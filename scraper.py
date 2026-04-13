@@ -27,6 +27,8 @@ from bs4 import BeautifulSoup
 import feedparser
 import arxiv
 
+import os
+
 from config import (
     BROWSER_HEADERS,
     ARXIV_CATEGORIES,
@@ -37,6 +39,10 @@ from config import (
 )
 
 log = logging.getLogger(__name__)
+
+# Disable scholarly on cloud environments where Google blocks server IPs.
+# Set ENABLE_SCHOLARLY=1 to force-enable (e.g. when running locally with a VPN).
+ENABLE_SCHOLARLY: bool = os.environ.get("ENABLE_SCHOLARLY", "0") == "1"
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -72,7 +78,11 @@ def scrape_google_scholar_professor(
     """
     Fetch recent publications for a professor who has a google_scholar_id.
     Falls back to keyword search by name if no ID is set.
+    Disabled by default on cloud servers (Google blocks them); set ENABLE_SCHOLARLY=1 to force.
     """
+    if not ENABLE_SCHOLARLY:
+        log.info("Scholar skipped for %s (ENABLE_SCHOLARLY=0)", professor["name"])
+        return
     try:
         from scholarly import scholarly as _scholarly, ProxyGenerator
     except ImportError:
@@ -148,7 +158,9 @@ def scrape_google_scholar_keyword(
     keyword: dict,
     source_id: int,
 ) -> Generator[dict, None, None]:
-    """Search Google Scholar for a keyword alert."""
+    """Search Google Scholar for a keyword alert. Disabled on cloud by default."""
+    if not ENABLE_SCHOLARLY:
+        return
     try:
         from scholarly import scholarly as _scholarly
     except ImportError:

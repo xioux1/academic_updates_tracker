@@ -1,0 +1,80 @@
+name: AcademicRadar Weekly Scan
+
+on:
+  schedule:
+    # Every Monday at 11:00 UTC = 08:00 Argentina time (UTC-3)
+    - cron: "0 11 * * 1"
+  workflow_dispatch:  # allow manual trigger from GitHub UI
+
+permissions:
+  contents: write   # needed to commit the updated DB
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      SMTP_HOST:         ${{ secrets.SMTP_HOST }}
+      SMTP_PORT:         ${{ secrets.SMTP_PORT }}
+      SMTP_USER:         ${{ secrets.SMTP_USER }}
+      SMTP_PASSWORD:     ${{ secrets.SMTP_PASSWORD }}
+      EMAIL_TO:          ${{ secrets.EMAIL_TO }}
+      EMAIL_FROM:        ${{ secrets.EMAIL_FROM }}
+      DB_PATH:           academic_radar.db
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Initialise database (if new)
+        run: python - <<'EOF'
+import database as db
+db.init_db()
+print("Database initialised.")
+EOF
+
+      - name: Run scraper
+        run: python - <<'EOF'
+import scraper, database as db, json
+summary = scraper.run_full_scan()
+db.log_scan(summary)
+print(json.dumps({k: v for k, v in summary.items() if k != "errors"}, indent=2))
+if summary.get("errors"):
+    print("Errors:", summary["errors"][:10])
+EOF
+
+      - name: Run Claude analysis
+        run: python - <<'EOF'
+import analyzer, json
+result = analyzer.run_analysis(batch_size=100)
+print(json.dumps(result, indent=2))
+EOF
+
+      - name: Generate and send digest
+        run: python - <<'EOF'
+import digest, json
+result = digest.run_digest(send_email=True)
+print("Digest ID:", result["digest_id"])
+print("Stats:", json.dumps(result["digest"]["stats"], indent=2))
+EOF
+
+      - name: Commit updated database
+        run: |
+          git config user.name  "AcademicRadar Bot"
+          git config user.email "actions@github.com"
+          git add academic_radar.db user_profile.txt || true
+          git diff --cached --quiet || git commit -m "chore: weekly scan $(date -u +%Y-%m-%d)"
+          git push origin HEAD

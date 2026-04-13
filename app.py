@@ -1,11 +1,24 @@
 """
 app.py — AcademicRadar Streamlit Dashboard entry point.
-Run with: streamlit run app.py
+Run locally:  streamlit run app.py
+Run on Render: startCommand in render.yaml handles the port binding.
 """
 
+# Load .env file when running locally (Render sets env vars natively)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+import os
+import threading
+import logging
 import streamlit as st
 import database as db
 import config as cfg
+
+logging.basicConfig(level=logging.INFO)
 
 # Must be first Streamlit call
 st.set_page_config(
@@ -17,6 +30,48 @@ st.set_page_config(
 
 # Initialize DB on first run
 db.init_db(cfg.DB_PATH)
+
+# ── Background weekly scheduler ─────────────────────────────────────────────
+# Runs inside the web service so no separate cron service is needed on Render.
+# Only starts the scheduler once per process (guarded by session state flag
+# stored on the module-level sentinel below).
+
+_SCHEDULER_STARTED = False
+
+def _start_scheduler():
+    global _SCHEDULER_STARTED
+    if _SCHEDULER_STARTED:
+        return
+    _SCHEDULER_STARTED = True
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        from apscheduler.triggers.cron import CronTrigger
+        import scraper, analyzer
+        from digest import run_digest
+
+        def weekly_job():
+            logging.info("APScheduler: starting weekly scan…")
+            try:
+                summary = scraper.run_full_scan(cfg.DB_PATH)
+                db.log_scan(summary, cfg.DB_PATH)
+                analyzer.run_analysis(cfg.DB_PATH, batch_size=100)
+                run_digest(cfg.DB_PATH, send_email=bool(cfg.EMAIL_TO))
+                logging.info("APScheduler: weekly scan complete.")
+            except Exception as e:
+                logging.error("APScheduler weekly job error: %s", e)
+
+        scheduler = BackgroundScheduler()
+        # Every Monday at 11:00 UTC (08:00 Argentina)
+        scheduler.add_job(weekly_job, CronTrigger(day_of_week="mon", hour=11, minute=0))
+        scheduler.start()
+        logging.info("APScheduler started — weekly job registered.")
+    except ImportError:
+        logging.warning("apscheduler not installed — weekly background job disabled.")
+    except Exception as e:
+        logging.error("Failed to start APScheduler: %s", e)
+
+# Start scheduler in a daemon thread so it doesn't block Streamlit startup
+threading.Thread(target=_start_scheduler, daemon=True).start()
 
 # ── Dark theme CSS ──────────────────────────────────────────────────────────
 st.markdown("""
@@ -58,9 +113,11 @@ with st.sidebar:
 
 
 # ── Route to views ──────────────────────────────────────────────────────────
-if   page == "📊 Dashboard":         exec(open("views/dashboard.py").read())
-elif page == "👨‍🏫 Profesores":       exec(open("views/professors.py").read())
-elif page == "🔑 Keywords":           exec(open("views/keywords.py").read())
-elif page == "📄 Findings":           exec(open("views/findings.py").read())
-elif page == "📬 Digest":             exec(open("views/digest_view.py").read())
-elif page == "⚙️ Configuración":      exec(open("views/settings.py").read())
+_views_dir = os.path.join(os.path.dirname(__file__), "views")
+
+if   page == "📊 Dashboard":       exec(open(os.path.join(_views_dir, "dashboard.py")).read())
+elif page == "👨‍🏫 Profesores":     exec(open(os.path.join(_views_dir, "professors.py")).read())
+elif page == "🔑 Keywords":         exec(open(os.path.join(_views_dir, "keywords.py")).read())
+elif page == "📄 Findings":         exec(open(os.path.join(_views_dir, "findings.py")).read())
+elif page == "📬 Digest":           exec(open(os.path.join(_views_dir, "digest_view.py")).read())
+elif page == "⚙️ Configuración":    exec(open(os.path.join(_views_dir, "settings.py")).read())

@@ -1,0 +1,65 @@
+# render.yaml — AcademicRadar infrastructure as code for Render.com
+# Deploy: connect this repo in render.com and it picks this file up automatically.
+#
+# Architecture:
+#   - 1 Web Service  → Streamlit dashboard (free plan)
+#   - 1 Persistent Disk → SQLite database survives deploys/restarts (~$1/month for 1 GB)
+#   - Weekly cron runs INSIDE the web service via APScheduler (no extra service needed)
+
+services:
+  - type: web
+    name: academic-radar
+    runtime: python
+    plan: free                      # upgrade to starter for always-on ($7/month)
+    region: oregon                  # change to frankfurt if you prefer EU latency
+
+    buildCommand: pip install -r requirements.txt
+
+    # Render injects $PORT automatically; headless=true disables browser auto-open
+    startCommand: >
+      streamlit run app.py
+      --server.port $PORT
+      --server.address 0.0.0.0
+      --server.headless true
+      --server.enableCORS false
+      --server.enableXsrfProtection false
+
+    # Persistent disk — SQLite lives here and survives redeploys
+    disk:
+      name: academic-radar-data
+      mountPath: /data
+      sizeGB: 1                     # $0.25/GB/month → ~$0.25/month
+
+    healthCheckPath: /              # Render pings this to confirm the service is up
+
+    envVars:
+      # Disk path — must match mountPath above
+      - key: DB_PATH
+        value: /data/academic_radar.db
+
+      # ── Secrets: set these in the Render dashboard (Environment tab) ──────
+      - key: ANTHROPIC_API_KEY
+        sync: false                 # "sync: false" = you fill it in the dashboard
+
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: EMAIL_TO
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+
+      # ── Tuning (optional, safe defaults shown) ────────────────────────────
+      - key: SCRAPER_DELAY
+        value: "2.0"
+      - key: ARXIV_MAX_RESULTS
+        value: "30"
+      - key: SCHOLAR_MAX_RESULTS
+        value: "10"
+      - key: DAYS_LOOKBACK
+        value: "30"

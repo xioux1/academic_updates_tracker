@@ -32,17 +32,39 @@ st.set_page_config(
 db.init_db(cfg.DB_PATH)
 
 # ── Background weekly scheduler ─────────────────────────────────────────────
-# Runs inside the web service so no separate cron service is needed on Render.
-# Only starts the scheduler once per process (guarded by session state flag
-# stored on the module-level sentinel below).
+# Uses a PID lock file so only ONE process (across all Streamlit workers)
+# ever runs the scheduler. Subsequent workers detect the lock and skip.
 
-_SCHEDULER_STARTED = False
+_SCHEDULER_LOCK = "/tmp/academic_radar_scheduler.lock"
 
 def _start_scheduler():
-    global _SCHEDULER_STARTED
-    if _SCHEDULER_STARTED:
-        return
-    _SCHEDULER_STARTED = True
+    import os, atexit
+
+    # Check if another process already holds the lock
+    if os.path.exists(_SCHEDULER_LOCK):
+        try:
+            with open(_SCHEDULER_LOCK) as f:
+                pid = int(f.read().strip())
+            # Verify the PID is still alive
+            os.kill(pid, 0)
+            logging.info("APScheduler already running in PID %d — skipping.", pid)
+            return
+        except (ValueError, ProcessLookupError, PermissionError):
+            # Stale lock — remove and continue
+            os.remove(_SCHEDULER_LOCK)
+
+    # Write our PID to the lock file
+    with open(_SCHEDULER_LOCK, "w") as f:
+        f.write(str(os.getpid()))
+
+    def _remove_lock():
+        try:
+            os.remove(_SCHEDULER_LOCK)
+        except FileNotFoundError:
+            pass
+
+    atexit.register(_remove_lock)
+
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
         from apscheduler.triggers.cron import CronTrigger
@@ -64,11 +86,13 @@ def _start_scheduler():
         # Every Monday at 11:00 UTC (08:00 Argentina)
         scheduler.add_job(weekly_job, CronTrigger(day_of_week="mon", hour=11, minute=0))
         scheduler.start()
-        logging.info("APScheduler started — weekly job registered.")
+        logging.info("APScheduler started (PID %d) — weekly job registered.", os.getpid())
     except ImportError:
         logging.warning("apscheduler not installed — weekly background job disabled.")
+        _remove_lock()
     except Exception as e:
         logging.error("Failed to start APScheduler: %s", e)
+        _remove_lock()
 
 # Start scheduler in a daemon thread so it doesn't block Streamlit startup
 threading.Thread(target=_start_scheduler, daemon=True).start()

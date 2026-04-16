@@ -597,6 +597,10 @@ def scrape_university_pages(
     unchanged_programs = 0
     inconsistent_programs = 0
     processed_urls = 0
+    connector_success = 0
+    connector_fail = 0
+    connector_name = university.get("name", "unknown_connector")
+    errors: list[str] = []
 
     try:
         uni_name = university["name"]
@@ -617,16 +621,25 @@ def scrape_university_pages(
         for idx, url in enumerate(university.get("candidate_urls", []), start=1):
             fetch_result = _fetch_page_with_retry(url, timeout=20)
             if not fetch_result:
+                connector_fail += 1
+                errors.append(f"fetch_failed:{url}")
                 continue
             resp = fetch_result["response"]
             soup = BeautifulSoup(resp.text, "html.parser")
             page_text = _normalize_whitespace(soup.get_text(" ", strip=True))
             if fetch_result.get("empty_page") or not page_text:
                 log.info("Skipping empty page url=%s status=%s", url, fetch_result.get("status_code"))
+                connector_fail += 1
+                errors.append(f"empty_page:{url}")
                 continue
 
             processed_urls += 1
             extracted_programs, connector_metadata = _extract_programs_with_connector(uni_name, soup, url)
+            if extracted_programs:
+                connector_success += 1
+            else:
+                connector_fail += 1
+                errors.append(f"no_programs_extracted:{url}")
             technical_metadata = {
                 "status_code": fetch_result.get("status_code"),
                 "redirect_chain": fetch_result.get("redirect_chain", []),
@@ -696,6 +709,10 @@ def scrape_university_pages(
             "programs_updated": updated_programs,
             "programs_unchanged": unchanged_programs,
             "programs_with_inconsistency": inconsistent_programs,
+            "connector_name": connector_name,
+            "connector_success": connector_success,
+            "connector_fail": connector_fail,
+            "errors": errors,
         }
     finally:
         conn.close()
@@ -1249,6 +1266,11 @@ def run_full_scan(db_path: str = None) -> dict:
         "programs_omitted": 0,
         "score_omitted_cases": [],
         "errors": [],
+        "errors_by_source": {},
+        "university_counters": {},
+        "connector_counters": {},
+        "p0_status": "yellow",
+        "p0_reasons": [],
     }
     snapshot_id = db.create_snapshot(
         {
@@ -1266,109 +1288,173 @@ def run_full_scan(db_path: str = None) -> dict:
     active_profs = [p for p in professors if p["status"] in ("active", "watching")]
     active_kws   = [k for k in keywords  if k["active"]]
 
+    source_metrics: dict[str, dict[str, int]] = {}
+    fresh_items = 0
+    stale_items = 0
+    critical_nulls = 0
+
+    def _touch_source(source_key: str) -> dict[str, int]:
+        entry = source_metrics.setdefault(
+            source_key,
+            {"success": 0, "fail": 0, "errors": 0},
+        )
+        return entry
+
+    def _record_source_error(source_key: str, message: str) -> None:
+        src = _touch_source(source_key)
+        src["errors"] += 1
+        summary["errors"].append(message)
+        summary["errors_by_source"][source_key] = src["errors"]
+
+    def _record_uni_counter(university_name: str, *, success: int = 0, fail: int = 0) -> None:
+        name = university_name or "unknown_university"
+        current = summary["university_counters"].setdefault(name, {"success": 0, "fail": 0})
+        current["success"] += success
+        current["fail"] += fail
+
+    def _record_connector_counter(connector_name: str, *, success: int = 0, fail: int = 0) -> None:
+        name = connector_name or "unknown_connector"
+        current = summary["connector_counters"].setdefault(name, {"success": 0, "fail": 0})
+        current["success"] += success
+        current["fail"] += fail
+
     def safe_add(finding: dict) -> bool:
+        nonlocal fresh_items, stale_items
         try:
             result = db.add_finding(finding, db_path)
             summary["findings_total"] += 1
+            published = (finding.get("date_published") or "")[:10]
+            if published:
+                try:
+                    pub_dt = datetime.strptime(published, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                    if pub_dt >= _cutoff_date():
+                        fresh_items += 1
+                    else:
+                        stale_items += 1
+                except ValueError:
+                    stale_items += 1
+            else:
+                stale_items += 1
             if result:
                 summary["findings_new"] += 1
                 return True
             return False
         except Exception as e:
             log.error("DB error adding finding: %s", e)
-            summary["errors"].append(str(e))
+            _record_source_error("database", str(e))
             return False
 
     # --- Google Scholar: professors ---
     if "google_scholar" in sources:
         src_id = sources["google_scholar"]["id"]
+        _touch_source("google_scholar")
         for prof in active_profs:
             try:
                 for finding in scrape_google_scholar_professor(prof, src_id):
                     safe_add(finding)
+                    source_metrics["google_scholar"]["success"] += 1
                     _sleep(1)
             except Exception as e:
                 msg = f"Scholar professor {prof['name']}: {traceback.format_exc()}"
                 log.error(msg)
-                summary["errors"].append(msg)
+                source_metrics["google_scholar"]["fail"] += 1
+                _record_source_error("google_scholar", msg)
             summary["professors_scanned"] += 1
             _sleep(SCRAPER_DELAY_SECONDS)
 
     # --- Google Scholar: keywords ---
     if "google_scholar" in sources:
         src_id = sources["google_scholar"]["id"]
+        _touch_source("google_scholar")
         for kw in active_kws:
             try:
                 for finding in scrape_google_scholar_keyword(kw, src_id):
                     safe_add(finding)
+                    source_metrics["google_scholar"]["success"] += 1
             except Exception as e:
                 msg = f"Scholar keyword {kw['keyword']}: {e}"
                 log.error(msg)
-                summary["errors"].append(msg)
+                source_metrics["google_scholar"]["fail"] += 1
+                _record_source_error("google_scholar", msg)
             _sleep(SCRAPER_DELAY_SECONDS)
 
     # --- arXiv ---
     if "arxiv" in sources:
         src_id = sources["arxiv"]["id"]
+        _touch_source("arxiv")
         try:
             for finding in scrape_arxiv_keywords(active_kws, src_id):
                 safe_add(finding)
+                source_metrics["arxiv"]["success"] += 1
         except Exception as e:
             msg = f"arXiv scan: {e}"
             log.error(msg)
-            summary["errors"].append(msg)
+            source_metrics["arxiv"]["fail"] += 1
+            _record_source_error("arxiv", msg)
 
     # --- GitHub: professors ---
     if "github" in sources:
         src_id = sources["github"]["id"]
+        _touch_source("github")
         for prof in active_profs:
             try:
                 for finding in scrape_github_professor(prof, src_id):
                     safe_add(finding)
+                    source_metrics["github"]["success"] += 1
             except Exception as e:
                 msg = f"GitHub professor {prof['name']}: {e}"
                 log.error(msg)
-                summary["errors"].append(msg)
+                source_metrics["github"]["fail"] += 1
+                _record_source_error("github", msg)
             _sleep(1)
 
     # --- GitHub: keywords ---
     if "github" in sources:
         src_id = sources["github"]["id"]
+        _touch_source("github")
         for kw in active_kws:
             try:
                 for finding in scrape_github_keyword(kw, src_id):
                     safe_add(finding)
+                    source_metrics["github"]["success"] += 1
             except Exception as e:
                 msg = f"GitHub keyword {kw['keyword']}: {e}"
                 log.error(msg)
-                summary["errors"].append(msg)
+                source_metrics["github"]["fail"] += 1
+                _record_source_error("github", msg)
             _sleep(1)
 
     # --- CNKI ---
     if "cnki" in sources:
         src_id = sources["cnki"]["id"]
+        _touch_source("cnki")
         zh_kws = [k for k in active_kws if k.get("language") == "zh"]
         for kw in zh_kws:
             try:
                 for finding in scrape_cnki(kw, src_id):
                     safe_add(finding)
+                    source_metrics["cnki"]["success"] += 1
             except Exception as e:
                 msg = f"CNKI keyword {kw['keyword']}: {e}"
                 log.error(msg)
-                summary["errors"].append(msg)
+                source_metrics["cnki"]["fail"] += 1
+                _record_source_error("cnki", msg)
             _sleep(SCRAPER_DELAY_SECONDS * 2)
 
     # --- Baidu Scholar ---
     if "baidu_scholar" in sources:
         src_id = sources["baidu_scholar"]["id"]
+        _touch_source("baidu_scholar")
         for kw in active_kws:
             try:
                 for finding in scrape_baidu_scholar(kw, src_id):
                     safe_add(finding)
+                    source_metrics["baidu_scholar"]["success"] += 1
             except Exception as e:
                 msg = f"Baidu Scholar keyword {kw['keyword']}: {e}"
                 log.error(msg)
-                summary["errors"].append(msg)
+                source_metrics["baidu_scholar"]["fail"] += 1
+                _record_source_error("baidu_scholar", msg)
             _sleep(SCRAPER_DELAY_SECONDS)
 
     # --- University admissions intelligence ---
@@ -1379,10 +1465,23 @@ def run_full_scan(db_path: str = None) -> dict:
             summary["entities_created"] += uni_summary.get("programs_created", 0)
             summary["entities_updated"] += uni_summary.get("programs_updated", 0)
             summary["inconsistencies_detected"] += uni_summary.get("programs_with_inconsistency", 0)
+            _record_uni_counter(
+                uni_summary.get("university", "unknown_university"),
+                success=uni_summary.get("programs_created", 0) + uni_summary.get("programs_updated", 0),
+                fail=uni_summary.get("connector_fail", 0),
+            )
+            _record_connector_counter(
+                uni_summary.get("connector_name", "unknown_connector"),
+                success=uni_summary.get("connector_success", 0),
+                fail=uni_summary.get("connector_fail", 0),
+            )
+            if uni_summary.get("errors"):
+                for err in uni_summary["errors"]:
+                    _record_source_error(uni_summary.get("connector_name", "university_connector"), err)
     except Exception as e:
         msg = f"University intelligence scan: {e}"
         log.error(msg)
-        summary["errors"].append(msg)
+        _record_source_error("university", msg)
 
     summary["keywords_scanned"] = len(active_kws)
 
@@ -1396,12 +1495,68 @@ def run_full_scan(db_path: str = None) -> dict:
     summary["programs_scored"] = scoring_summary.get("programs_scored", 0)
     summary["programs_omitted"] = scoring_summary.get("programs_omitted", 0)
     summary["score_omitted_cases"] = scoring_summary.get("omitted_cases", [])
+    critical_nulls = len(summary["score_omitted_cases"])
+    total_connector_success = sum(v.get("success", 0) for v in source_metrics.values())
+    total_connector_fail = sum(v.get("fail", 0) for v in source_metrics.values())
+    freshness_total = fresh_items + stale_items
+    freshness_ratio = (fresh_items / freshness_total) if freshness_total else 0.0
+    coverage_den = total_connector_success + total_connector_fail
+    coverage_ratio = (total_connector_success / coverage_den) if coverage_den else 0.0
+
+    p0_reasons: list[str] = []
+    if coverage_ratio < 0.70:
+        p0_reasons.append("Cobertura por debajo del 70%")
+    if freshness_ratio < 0.60:
+        p0_reasons.append("Freshness por debajo del 60%")
+    if summary["inconsistencies_detected"] > 5:
+        p0_reasons.append("Muchas inconsistencias detectadas")
+    if critical_nulls > 0:
+        p0_reasons.append("Hay nulos críticos en campos de scoring")
+    if len(summary["errors"]) > 0:
+        p0_reasons.append("Se registraron errores en conectores")
+
+    if not p0_reasons:
+        p0_status = "green"
+    elif coverage_ratio < 0.50 or freshness_ratio < 0.40 or critical_nulls > 8:
+        p0_status = "red"
+    else:
+        p0_status = "yellow"
+    summary["p0_status"] = p0_status
+    summary["p0_reasons"] = p0_reasons
+
+    summary["metrics"] = {
+        "coverage": {
+            "ratio": round(coverage_ratio, 4),
+            "success": total_connector_success,
+            "fail": total_connector_fail,
+        },
+        "freshness": {
+            "ratio": round(freshness_ratio, 4),
+            "fresh_items": fresh_items,
+            "stale_items": stale_items,
+        },
+        "inconsistencies": {
+            "count": summary["inconsistencies_detected"],
+        },
+        "critical_nulls": {
+            "count": critical_nulls,
+        },
+        "errors_by_source": summary["errors_by_source"],
+    }
+
     db.update_snapshot_summary(
         snapshot_id,
         {
             "programs_scored": summary["programs_scored"],
             "programs_omitted": summary["programs_omitted"],
             "score_omitted_cases": summary["score_omitted_cases"],
+            "metrics": summary["metrics"],
+            "p0_status": summary["p0_status"],
+            "p0_reasons": summary["p0_reasons"],
+            "errors_by_source": summary["errors_by_source"],
+            "university_counters": summary["university_counters"],
+            "connector_counters": summary["connector_counters"],
+            "scan_week": datetime.now(timezone.utc).strftime("%G-W%V"),
         },
         db_path,
     )

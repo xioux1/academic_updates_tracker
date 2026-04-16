@@ -264,6 +264,32 @@ Candidato internacional que quiere optimizar admisión + calidad de vida + valor
 ## Fase 5 — Sistema vivo
 - Alertas, recalculado continuo, reportes periódicos.
 
+### Plan táctico de ejecución (3 sprints / 3 semanas)
+
+#### Sprint 1 (Semana 1) — datos y snapshots
+- Extender schema con entidades núcleo del PRD.
+- Completar CRUD base para `University`, `Program`, `Faculty`, `SourceDocument`, `EvidenceSnippet` y `ScoreBreakdown`.
+- Cerrar ciclo de vida de snapshot (`create -> tag entities -> close -> diff`).
+
+**Criterio de salida S1**
+- DB lista con entidades PRD y versionado funcional de snapshots.
+
+#### Sprint 2 (Semana 2) — ingestión oficial Shenzhen
+- Cargar seeds iniciales de universidades objetivo en Shenzhen.
+- Implementar scraping de admisión desde fuentes oficiales.
+- Extraer programas y registrar evidencia (`source_url` + snippet) por campo crítico.
+
+**Criterio de salida S2**
+- Al menos 2 universidades con programas extraídos y evidencia trazable.
+
+#### Sprint 3 (Semana 3) — scoring + decision console
+- Implementar sub-scores explicables (`admission`, `strategic`, `lifestyle`, `contact`, `confidence`).
+- Generar ranking priorizado utilizable para shortlist.
+- Exponer vista de cambios entre snapshots + contactos recomendados.
+
+**Criterio de salida S3**
+- Ranking utilizable con explicación y changelog visible en la consola de decisión.
+
 ---
 
 ## 13) Riesgos y mitigaciones
@@ -299,4 +325,3 @@ Candidato internacional que quiere optimizar admisión + calidad de vida + valor
 2. No hay inferencia sin evidencia.
 3. No se mezcla dato oficial con inferido sin etiquetado explícito.
 4. Mejor cobertura confiable que cobertura masiva opaca.
-

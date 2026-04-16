@@ -694,8 +694,12 @@ def scrape_university_pages(
     unchanged_programs = 0
     inconsistent_programs = 0
     processed_urls = 0
+    attempted_urls = 0
     connector_success = 0
     connector_fail = 0
+    critical_fields_expected = 0
+    critical_fields_complete = 0
+    null_field_count = 0
     connector_name = university.get("name", "unknown_connector")
     errors: list[str] = []
 
@@ -715,7 +719,9 @@ def scrape_university_pages(
         else:
             uni_id = existing_uni["id"]
 
-        for idx, url in enumerate(university.get("candidate_urls", []), start=1):
+        candidate_urls = university.get("candidate_urls", [])
+        attempted_urls = len(candidate_urls)
+        for idx, url in enumerate(candidate_urls, start=1):
             fetch_result = _fetch_page_with_retry(url, timeout=20)
             if not fetch_result:
                 connector_fail += 1
@@ -759,6 +765,15 @@ def scrape_university_pages(
                 technical_metadata=technical_metadata,
             )
             for program in extracted_programs:
+                critical_fields = dict(program.get("critical_fields", {}))
+                for field_key in CRITICAL_FIELD_KEYS:
+                    critical_fields_expected += 1
+                    value = critical_fields.get(field_key)
+                    is_present = value not in (None, "", "not_found")
+                    if is_present:
+                        critical_fields_complete += 1
+                    else:
+                        null_field_count += 1
                 normalized_program = normalize_program_payload(program)
                 official_critical = dict(program.get("critical_fields", {}))
                 official_critical["normalization_trace"] = normalized_program["official_data"]
@@ -814,8 +829,14 @@ def scrape_university_pages(
             _sleep(0.4)
 
         conn.commit()
+        completeness_pct = (
+            (100.0 * critical_fields_complete / critical_fields_expected)
+            if critical_fields_expected
+            else 0.0
+        )
         return {
             "university": uni_name,
+            "attempted_urls": attempted_urls,
             "processed_urls": processed_urls,
             "programs_created": created_programs,
             "programs_updated": updated_programs,
@@ -824,6 +845,10 @@ def scrape_university_pages(
             "connector_name": connector_name,
             "connector_success": connector_success,
             "connector_fail": connector_fail,
+            "critical_fields_expected": critical_fields_expected,
+            "critical_fields_complete": critical_fields_complete,
+            "critical_field_completeness_pct": round(completeness_pct, 2),
+            "null_field_count": null_field_count,
             "errors": errors,
         }
     finally:
@@ -1408,6 +1433,11 @@ def run_full_scan(
     fresh_items = 0
     stale_items = 0
     critical_nulls = 0
+    quality_attempted_urls = 0
+    quality_successful_parses = 0
+    quality_critical_fields_expected = 0
+    quality_critical_fields_complete = 0
+    quality_null_field_count = 0
 
     def _touch_source(source_key: str) -> dict[str, int]:
         entry = source_metrics.setdefault(
@@ -1581,6 +1611,11 @@ def run_full_scan(
             summary["entities_created"] += uni_summary.get("programs_created", 0)
             summary["entities_updated"] += uni_summary.get("programs_updated", 0)
             summary["inconsistencies_detected"] += uni_summary.get("programs_with_inconsistency", 0)
+            quality_attempted_urls += int(uni_summary.get("attempted_urls", 0) or 0)
+            quality_successful_parses += int(uni_summary.get("connector_success", 0) or 0)
+            quality_critical_fields_expected += int(uni_summary.get("critical_fields_expected", 0) or 0)
+            quality_critical_fields_complete += int(uni_summary.get("critical_fields_complete", 0) or 0)
+            quality_null_field_count += int(uni_summary.get("null_field_count", 0) or 0)
             _record_uni_counter(
                 uni_summary.get("university", "unknown_university"),
                 success=uni_summary.get("programs_created", 0) + uni_summary.get("programs_updated", 0),
@@ -1641,6 +1676,21 @@ def run_full_scan(
     summary["p0_status"] = p0_status
     summary["p0_reasons"] = p0_reasons
 
+    critical_field_completeness_pct = (
+        (100.0 * quality_critical_fields_complete / quality_critical_fields_expected)
+        if quality_critical_fields_expected
+        else 0.0
+    )
+    extraction_quality_snapshot = {
+        "attempted_urls": quality_attempted_urls,
+        "successful_parses": quality_successful_parses,
+        "critical_field_completeness_pct": round(critical_field_completeness_pct, 2),
+        "null_field_count": quality_null_field_count,
+        "inconsistency_flags": summary["inconsistencies_detected"],
+    }
+    summary["extraction_quality_snapshot"] = extraction_quality_snapshot
+    metadata["extraction_quality_snapshot"] = extraction_quality_snapshot
+
     summary["metrics"] = {
         "coverage": {
             "ratio": round(coverage_ratio, 4),
@@ -1672,11 +1722,13 @@ def run_full_scan(
             "p0_reasons": summary["p0_reasons"],
             "errors_by_source": summary["errors_by_source"],
             "change_summary": change_summary,
+            "extraction_quality_snapshot": extraction_quality_snapshot,
             "university_counters": summary["university_counters"],
             "connector_counters": summary["connector_counters"],
             "scan_week": datetime.now(timezone.utc).strftime("%G-W%V"),
         },
         db_path,
     )
+    db.update_snapshot_run_metadata(snapshot_id, metadata, db_path)
     db.close_snapshot(snapshot_id, db_path)
     return summary

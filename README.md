@@ -14,6 +14,8 @@ Este repositorio hoy combina:
 - ✅ El scoring multicriterio PRD ya corre de forma automática por snapshot (`scoring.py`) y persiste sub-scores explicables en `score_breakdowns`.
 - ✅ Se aplica umbral global de confianza (`MIN_CONFIDENCE_TO_RANK`) para bloquear programas de baja confiabilidad en el ranking.
 - ✅ Hardening de conectores por universidad completado para dominios prioritarios Shenzhen (SUSTech/HITSZ/SZU + SIGS Tsinghua + PKU Shenzhen Graduate School), con fallback selector → tabla → regex, retry por dominio y metadatos de troubleshooting.
+- ✅ Retry/backoff con jitter por dominio en capa de fetch (`DEFAULT_RETRY_POLICY`, `_retry_policy_for_url`, backoff exponencial + jitter, logging enriquecido de intentos/fallos/duración).
+- ✅ Cobertura de tests de contrato para conectores: fixtures HTML reales por universidad (SUSTech, HITSZ, SZU, Tsinghua SIGS, PKU SGS), tests parametrizados de extracción de campos críticos + evidencia, tests de regresión para edge cases de fecha/moneda y table-fallback, y tests unitarios de política de retry por hostname.
 - ⚠️ Pendiente: panel de calidad de datos y observabilidad agregada persistente en dashboard.
 
 Ver detalle en:

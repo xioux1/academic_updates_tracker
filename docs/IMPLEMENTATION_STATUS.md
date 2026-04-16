@@ -25,6 +25,8 @@ Implementado en `scraper.py` + `config.py`:
 - Discovery de URLs candidatas de admisión.
 - Extracción de campos críticos de programa desde HTML.
 - Persistencia de `source_documents` y `evidence_snippets` con trazabilidad.
+- Retry/backoff exponencial con jitter por dominio (`DEFAULT_RETRY_POLICY`, `_retry_policy_for_url`); logging enriquecido de intentos, espera y status final.
+- Metadatos técnicos de conector (`selectors_used`, `normalizer_used`, `connector_version`) para trazabilidad de troubleshooting.
 
 ## Tarea 3 — Snapshots y drift monitor (✅)
 
@@ -62,6 +64,17 @@ Implementado en `views/decision_console.py` y enrutado desde `app.py`:
 Se consolida con documentación operativa en:
 - `README.md` (overview y arquitectura actualizada).
 - `docs/NEXT_STEPS.md` (priorización P0/P1/P2 y entregables).
+
+---
+
+## Tarea 7 — Tests de contrato y fixtures de conectores (✅ Completado)
+
+Implementado en `tests/scraper/`:
+- Fixtures HTML reales por conector (`sustech_program.html`, `hitsz_program.html`, `szu_program.html`, `tsinghua_sigs_program.html`, `pku_sgs_program.html`).
+- Test parametrizado `test_connector_fixtures_extract_all_critical_fields_and_evidence` que valida: todos los `CRITICAL_FIELD_KEYS` presentes, evidencia no-`not_found` por campo, y `selectors_used` correcto.
+- Tests de regresión para edge cases de fecha/moneda (`date_currency_edge_cases.txt`) y table-fallback (`table_fallback_edge_cases.html`).
+- Tests unitarios de política de retry: selección por hostname (`test_retry_policy_selection_uses_hostname_profile`) y cumplimiento de intentos mínimos (`test_fetch_retry_enforces_minimum_attempts`).
+- Tests de calidad de snapshot (`test_extraction_quality_snapshot.py`).
 
 ---
 

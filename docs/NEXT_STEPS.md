@@ -12,12 +12,15 @@ Este roadmap prioriza cerrar brechas del PRD sin perder velocidad de entrega.
 ### 1) Hardening de extracción oficial por universidad (✅ completado en conectores prioritarios)
 - Se añadieron perfiles por dominio/universidad para: **SUSTech, HITSZ, SZU, SIGS Tsinghua y PKU Shenzhen Graduate School**.
 - Se dejó activa cadena de fallback por dominio: **selector-first → table parsing → regex**.
-- Se incorporaron políticas de retry/backoff por dominio para reducir fallos intermitentes.
+- Se incorporaron políticas de retry/backoff exponencial con jitter por dominio (`DEFAULT_RETRY_POLICY`, `_retry_policy_for_url`) para reducir fallos intermitentes; logging enriquecido de intentos, duración y status final.
 - Se persisten metadatos técnicos de conector (`selectors_used`, `connector_version`, `normalizer_used`) para troubleshooting.
-- Tests unitarios de parsing con fixtures HTML por dominio objetivo.
+- Fixtures HTML reales por conector (SUSTech, HITSZ, SZU, Tsinghua SIGS, PKU SGS) y tests parametrizados de contrato que validan todos los `CRITICAL_FIELD_KEYS` + evidencia trazable.
+- Tests de regresión para edge cases de fecha/moneda y table-fallback.
+- Tests unitarios de política de retry por hostname y cumplimiento de intentos mínimos.
 
 **Definition of Done**
 - ✅ Tasa de éxito estable por universidad objetivo (conectores prioritarios Shenzhen).
+- ✅ Suite de contrato en CI que detecta regresiones de parsing por conector.
 
 ### 2) Panel de calidad de datos
 - Métricas por snapshot: cobertura de programas, freshness, inconsistencias, campos nulos.

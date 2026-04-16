@@ -313,9 +313,9 @@ Candidato internacional que quiere optimizar admisión + calidad de vida + valor
 - [ ] Base con universidades seed y páginas oficiales registradas.
 - [ ] Al menos un pipeline funcional de extracción de programas.
 - [ ] Tabla de programas con campos críticos completos (idioma, duración, requisitos, deadline).
-- [ ] Score inicial de `admission_fit`, `strategic_fit`, `confidence`.
-- [ ] Changelog de cambios entre snapshots.
-- [ ] Vista de ranking con explicación de score.
+- [x] Score inicial de `admission_fit`, `strategic_fit`, `confidence`.
+- [x] Changelog de cambios entre snapshots.
+- [x] Vista de ranking con explicación de score.
 
 ---
 
@@ -335,9 +335,11 @@ Candidato internacional que quiere optimizar admisión + calidad de vida + valor
 - Pipeline de discovery/extracción para universidades y programas con seeds configurables.
 - Snapshots por corrida, diff de cambios y auditoría de campos sensibles/inconsistencias.
 - Decision Console en Streamlit con ranking Top-N, variaciones, motivos y recomendación de docentes.
+- Scoring PRD automático por snapshot con persistencia de sub-scores explicables.
+- Política de confianza global para bloqueo de ranking en programas de baja confiabilidad.
 
 ### Parcial
-- Scoring framework PRD: la infraestructura de persistencia/consumo existe, pero falta consolidar job automático de cálculo completo de sub-scores por snapshot.
+- Hardening de conectores por universidad y observabilidad de calidad por snapshot/fuente.
 
 ### Próximos pasos
 - Ver `docs/NEXT_STEPS.md` para roadmap P0/P1/P2.

@@ -4,9 +4,9 @@ Este documento resume qué partes del PRD ya están implementadas en el reposito
 
 ## Resumen ejecutivo
 
-- **Completado**: las 6 tareas iniciales del plan de arranque.
-- **Parcial**: scoring multicriterio automático end-to-end (existe esquema y consumo en UI, falta job de cálculo PRD completo).
-- **Pendiente**: endurecimiento de cobertura, calidad y operaciones de producción.
+- **Completado**: las 6 tareas iniciales del plan de arranque **y el cierre de P0 de scoring PRD**.
+- **Parcial**: hardening de conectores por universidad, normalización EN/ZH y observabilidad persistente.
+- **Pendiente**: escalado operativo (alertas, métricas avanzadas, calidad por fuente en dashboard).
 
 ---
 
@@ -33,16 +33,18 @@ Implementado en `database.py` + `scraper.py`:
 - Detección de cambios sensibles e inconsistencias con registro en `audit_records`.
 - Resumen de cambios para consumo en UI.
 
-## Tarea 4 — Motor de scoring explicable (🟡 Parcial)
+## Tarea 4 — Motor de scoring explicable (✅ Completado)
 
-Lo que sí está:
-- Estructura `score_breakdowns` para guardar score total/componentes/explicación.
-- `Decision Console` consume score más reciente por programa.
+Implementado en `scoring.py` + `scraper.py` + `database.py` + `config.py` + `views/decision_console.py`:
+- Job automático de scoring por snapshot (`score_snapshot`) ejecutado al final de `run_full_scan`.
+- Sub-scores PRD calculados y persistidos (`admission_fit`, `strategic_fit`, `lifestyle_fit`, `contact_leverage`, `information_confidence`).
+- Persistencia trazable en `score_breakdowns` (`score_value`, `components`, `explanation`, `confidence_score`).
+- Umbral global de confianza (`MIN_CONFIDENCE_TO_RANK`) para bloquear programas de baja confiabilidad.
+- Decision Console actualizada para mostrar bloqueos de ranking y motivo principal.
 
-Lo que falta para cierre PRD:
-- Job sistemático que calcule y persista sub-scores PRD (`admission`, `strategic`, `lifestyle`, `contact`, `confidence`).
-- Política de umbrales/bloqueo por baja confianza aplicada globalmente.
-- Re-cálculo automático por snapshot.
+Notas:
+- El scoring es reproducible por snapshot y desacoplado del render de UI.
+- Se mantiene prioridad por trazabilidad: no hay score útil sin `components` + `explanation`.
 
 ## Tarea 5 — Decision Console (✅)
 
@@ -65,9 +67,9 @@ Se consolida con documentación operativa en:
 ## Riesgos actuales
 
 1. **Cobertura variable por universidad**: depende de estructura HTML y calidad de páginas oficiales.
-2. **Scoring incompleto**: sin job de cálculo PRD continuo, la calidad del ranking puede variar.
+2. **Conectores aún genéricos en algunos dominios**: faltan selectores dedicados para más universidades.
 3. **Observabilidad limitada**: hay logs, pero faltan métricas persistentes de extracción/calidad por fuente.
 
 ## Decisión recomendada
 
-Priorizar P0 de `docs/NEXT_STEPS.md` antes de ampliar nuevas universidades, para asegurar estabilidad y confianza del ranking.
+Priorizar P1 de `docs/NEXT_STEPS.md` antes de ampliar fuerte la cobertura de nuevas universidades, para asegurar estabilidad y calidad sostenida.

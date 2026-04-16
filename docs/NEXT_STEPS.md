@@ -2,31 +2,14 @@
 
 Este roadmap prioriza cerrar brechas del PRD sin perder velocidad de entrega.
 
-## P0 (1-2 semanas) — Cerrar scoring PRD y confiabilidad mínima
+## Estado de avance
 
-### 1) Job de scoring multicriterio por snapshot
-- Implementar módulo dedicado (p.ej. `scoring.py`) con funciones por sub-score:
-  - `admission_fit`
-  - `strategic_fit`
-  - `lifestyle_fit`
-  - `contact_leverage`
-  - `information_confidence`
-- Persistir cada ejecución en `score_breakdowns` con `components` y `explanation`.
-- Ejecutar scoring al final de cada `run_full_scan`.
+- ✅ **P0 cerrado**: scoring PRD automático por snapshot, umbral global de confianza y bloqueo de ranking aplicado en consola.
+- ▶️ **En foco actual**: P1 de calidad/operación para estabilizar cobertura y observabilidad.
 
-**Definition of Done**
-- Cada programa nuevo/actualizado termina con `overall_score` trazable.
-- Decision Console deja de depender de cargas manuales de score.
+## P1 (2-4 semanas) — Calidad de datos y operaciones
 
-### 2) Política de confianza y bloqueo de ranking
-- Definir umbral global de confianza (configurable en `config.py`).
-- Si el score de confianza cae bajo umbral, marcar programa como "no rankeable".
-- Mostrar en UI la razón del bloqueo.
-
-**Definition of Done**
-- Ningún programa con confianza crítica aparece en Top-N sin advertencia explícita.
-
-### 3) Hardening de extracción oficial
+### 1) Hardening de extracción oficial por universidad
 - Añadir conectores específicos por universidad (selectores/patrones dedicados).
 - Tests unitarios de parsing con fixtures HTML reales.
 - Backoff/retry por dominio para disminuir fallos intermitentes.
@@ -34,19 +17,18 @@ Este roadmap prioriza cerrar brechas del PRD sin perder velocidad de entrega.
 **Definition of Done**
 - Tasa de éxito estable por universidad objetivo.
 
----
-
-## P1 (2-4 semanas) — Calidad de datos y operaciones
-
-### 4) Panel de calidad de datos
+### 2) Panel de calidad de datos
 - Métricas por snapshot: cobertura de programas, freshness, inconsistencias, campos nulos.
 - Vista en dashboard para detectar degradación temprana.
 
-### 5) Normalización e internacionalización robusta (EN/ZH)
+**Definition of Done**
+ - Snapshot reciente visible con semáforos de calidad y tendencia vs snapshot previo.
+
+### 3) Normalización e internacionalización robusta (EN/ZH)
 - Pipeline de normalización de fechas, moneda, idioma y nomenclaturas.
 - Reglas para mapear variaciones de nombres de programas/departamentos.
 
-### 6) Backfill histórico inicial
+### 4) Backfill histórico inicial
 - Ejecutar corridas controladas para generar historial base de snapshots (`run_backfill.py`).
 - Definir ventana operativa de 4–8 semanas (default recomendado: 6).
 - Definir frecuencia por fuente para controlar carga:
@@ -60,15 +42,15 @@ Este roadmap prioriza cerrar brechas del PRD sin perder velocidad de entrega.
 
 ## P2 (4-8 semanas) — Escalado y producto
 
-### 7) Perfil de usuario y pesos dinámicos en UI
+### 5) Perfil de usuario y pesos dinámicos en UI
 - Editor de `UserProfile.weights`.
 - Recalcular ranking en tiempo real por perfil.
 
-### 8) Alertas periódicas
+### 6) Alertas periódicas
 - Digest de cambios críticos por email/Slack.
 - Trigger por deadlines cercanos y cambios sensibles.
 
-### 9) Observabilidad de jobs
+### 7) Observabilidad de jobs
 - Persistir métricas de ejecución: duración, errores por fuente, registros procesados.
 - Alertar ante fallos consecutivos por universidad/fuente.
 

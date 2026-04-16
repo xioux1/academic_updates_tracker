@@ -179,31 +179,98 @@ def _build_program_contract(
     ]
 
 
-def _extract_with_regex(page_text: str, source_url: str) -> list[dict]:
-    specs: dict[str, tuple[str, str]] = {
-        "idioma": (r"(language of instruction|teaching language|语言).*?(english|chinese|bilingual)", "language"),
-        "duración": (r"(duration|length of study|学制).*?(\d+\s*(?:year|years|semester|semesters|年))", "duration"),
-        "tuition": (r"(tuition|fee|学费).*?((?:rmb|cny|\$|usd)?\s?\d[\d,\.]*)", "tuition"),
-        "requisitos": (r"(requirements?|eligibility|admission criteria|申请条件)\s*[:：]?\s*([^.;]{10,220})", "requirements"),
-        "deadlines": (r"(deadline|application due|截止日期)\s*[:：]?\s*([^.;]{3,120})", "deadlines"),
-        "portal": (r"(apply|application portal|online application|申请系统).*?(https?://[^\s)]+)", "portal"),
-        "supervisor_required": (r"(supervisor|advisor|导师).{0,60}(required|must|必要|需要)", "supervisor_required"),
-        "interview_required": (r"(interview|面试).{0,60}(required|must|必要|需要)", "interview_required"),
+def _match_field_spec(
+    normalized_text: str,
+    source_url: str,
+    patterns: list[str],
+    *,
+    value_group: int = 0,
+    truthy_flag: bool = False,
+    locator: str = "regex_match",
+) -> tuple[Optional[str], Optional[dict[str, str]]]:
+    for pattern in patterns:
+        match = re.search(pattern, normalized_text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        snippet = _normalize_whitespace(match.group(0))
+        value = "yes" if truthy_flag else _normalize_whitespace(match.group(value_group))
+        return value, {"snippet": snippet, "url": source_url, "locator": locator}
+    return None, None
+
+
+def _extract_critical_fields_from_text(page_text: str, source_url: str) -> tuple[dict[str, Optional[str]], dict[str, dict[str, str]]]:
+    normalized = _normalize_whitespace(page_text)
+    field_specs: dict[str, dict[str, Any]] = {
+        "language": {
+            "patterns": [
+                r"(?:language of instruction|teaching language|语言)\s*[:：-]?\s*(english|chinese|bilingual)",
+            ],
+            "value_group": 1,
+        },
+        "duration": {
+            "patterns": [
+                r"(?:duration|length of study|学制)\s*[:：-]?\s*(\d+\s*(?:years|year|semesters|semester|months|month|年))",
+            ],
+            "value_group": 1,
+        },
+        "tuition": {
+            "patterns": [
+                r"(?:tuition|fee|学费)[^.;]{0,100}?((?:rmb|cny|usd|\$|¥)\s?\d[\d,\.]*(?:\s*(?:per\s*year|/year|annual|元))?)",
+                r"((?:rmb|cny|usd|\$|¥)\s?\d[\d,\.]*(?:\s*(?:per\s*year|/year|annual|元))?)\s*(?:tuition|fee|学费)",
+            ],
+            "value_group": 1,
+        },
+        "requirements": {
+            "patterns": [
+                r"(?:requirements?|eligibility|admission criteria|申请条件)\s*[:：]?\s*([^.;]{10,220})",
+            ],
+            "value_group": 1,
+        },
+        "deadlines": {
+            "patterns": [
+                r"(?:deadline|application due|截止日期)\s*[:：]?\s*((?:\d{4}[/-]\d{1,2}[/-]\d{1,2})|(?:\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})|(?:[A-Za-z]{3,9}\s+\d{1,2},\s*\d{4})|(?:rolling basis)|(?:[^.;]{3,80}))",
+            ],
+            "value_group": 1,
+        },
+        "portal": {
+            "patterns": [
+                r"(?:apply|application portal|online application|申请系统)[^h]{0,40}(https?://[^\s)]+)",
+            ],
+            "value_group": 1,
+        },
+        "supervisor_required": {
+            "patterns": [
+                r"(?:supervisor|advisor|导师).{0,80}(?:required|must|必要|需要)",
+            ],
+            "truthy_flag": True,
+        },
+        "interview_required": {
+            "patterns": [
+                r"(?:interview|面试).{0,80}(?:required|must|必要|需要)",
+            ],
+            "truthy_flag": True,
+        },
     }
     extracted: dict[str, Optional[str]] = {}
     evidences: dict[str, dict[str, str]] = {}
-    normalized = _normalize_whitespace(page_text)
+    for field, spec in field_specs.items():
+        value, evidence = _match_field_spec(
+            normalized,
+            source_url,
+            spec["patterns"],
+            value_group=spec.get("value_group", 0),
+            truthy_flag=spec.get("truthy_flag", False),
+        )
+        if value:
+            extracted[field] = value
+        if evidence:
+            evidences[field] = evidence
+    return extracted, evidences
 
-    for _, (pattern, field_key) in specs.items():
-        m = re.search(pattern, normalized, flags=re.IGNORECASE)
-        if not m:
-            continue
-        snippet = _normalize_whitespace(m.group(0))
-        value = _normalize_whitespace(m.group(m.lastindex or 0))
-        if field_key in ("supervisor_required", "interview_required"):
-            value = "yes"
-        extracted[field_key] = value
-        evidences[field_key] = {"snippet": snippet, "url": source_url, "locator": "regex_match"}
+
+def _extract_with_regex(page_text: str, source_url: str) -> list[dict]:
+    normalized = _normalize_whitespace(page_text)
+    extracted, evidences = _extract_critical_fields_from_text(normalized, source_url)
 
     return _build_program_contract(
         source_url=source_url,
@@ -441,6 +508,28 @@ def _insert_evidence_snippet(
     )
 
 
+def _evidence_rows_for_program(
+    program: dict,
+    source_document_id: int,
+    entity_type: str,
+    entity_id: int,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for field_name, ev in program.get("evidence_by_field", {}).items():
+        rows.append(
+            {
+                "source_document_id": source_document_id,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "field_name": field_name,
+                "snippet_text": ev.get("snippet", "not_found"),
+                "source_url": ev.get("url", program.get("source_url", "")),
+                "locator": ev.get("locator", "not_found"),
+            }
+        )
+    return rows
+
+
 def discover_university_sources(seed_list: Optional[list[dict]] = None) -> list[dict]:
     """
     Discover likely admissions/program pages from configured university seeds.
@@ -581,16 +670,21 @@ def scrape_university_pages(
                 if inconsistency_flag:
                     inconsistent_programs += 1
 
-                for field_name, ev in program["evidence_by_field"].items():
+                for evidence_row in _evidence_rows_for_program(
+                    program,
+                    source_document_id=source_doc_id,
+                    entity_type="program",
+                    entity_id=program_id,
+                ):
                     _insert_evidence_snippet(
                         conn=conn,
-                        source_document_id=source_doc_id,
-                        entity_type="program",
-                        entity_id=program_id,
-                        field_name=field_name,
-                        snippet_text=ev["snippet"],
-                        source_url=ev["url"],
-                        locator=ev["locator"],
+                        source_document_id=evidence_row["source_document_id"],
+                        entity_type=evidence_row["entity_type"],
+                        entity_id=evidence_row["entity_id"],
+                        field_name=evidence_row["field_name"],
+                        snippet_text=evidence_row["snippet_text"],
+                        source_url=evidence_row["source_url"],
+                        locator=evidence_row["locator"],
                     )
             _sleep(0.4)
 

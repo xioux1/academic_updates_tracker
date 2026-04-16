@@ -519,6 +519,26 @@ def update_snapshot_summary(snapshot_id: int, summary: dict, db_path: str = DB_P
         conn.close()
 
 
+def get_scan_snapshot(snapshot_id: int, db_path: str = DB_PATH) -> Optional[dict]:
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            """SELECT id, started_at, closed_at, status, run_metadata, summary_json
+               FROM scan_snapshots
+               WHERE id=?
+               LIMIT 1""",
+            (snapshot_id,),
+        ).fetchone()
+        if not row:
+            return None
+        record = dict(row)
+        record["run_metadata"] = _json_loads(record.get("run_metadata"))
+        record["summary_json"] = _json_loads(record.get("summary_json"))
+        return record
+    finally:
+        conn.close()
+
+
 def upsert_score_breakdown(
     *,
     entity_type: str,

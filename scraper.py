@@ -1249,7 +1249,10 @@ def scrape_rss_feed(
 # Main scan entry point
 # ---------------------------------------------------------------------------
 
-def run_full_scan(db_path: str = None) -> dict:
+def run_full_scan(
+    db_path: str = None,
+    run_metadata: Optional[dict] = None,
+) -> dict:
     """
     Execute a complete scan across all active sources and professors.
     Returns a summary dict with counts and error list.
@@ -1280,13 +1283,14 @@ def run_full_scan(db_path: str = None) -> dict:
         "p0_status": "yellow",
         "p0_reasons": [],
     }
-    snapshot_id = db.create_snapshot(
-        {
-            "scan_type": "full_scan",
-            "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-        },
-        db_path,
-    )
+    metadata = {
+        "scan_type": "full_scan",
+        "run_kind": "production",
+        "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if run_metadata:
+        metadata.update(run_metadata)
+    snapshot_id = db.create_snapshot(metadata, db_path)
     summary["snapshot_id"] = snapshot_id
 
     professors = db.get_all_professors(db_path)
@@ -1494,6 +1498,7 @@ def run_full_scan(db_path: str = None) -> dict:
     summary["keywords_scanned"] = len(active_kws)
 
     change_summary = db.get_change_summary_for_ui(snapshot_id=snapshot_id, db_path=db_path)
+    summary["change_summary"] = change_summary
     summary["entities_created"] = change_summary["totals"]["added"]
     summary["entities_updated"] = change_summary["totals"]["modified"]
     summary["entities_removed"] = change_summary["totals"]["removed"]
@@ -1562,6 +1567,7 @@ def run_full_scan(db_path: str = None) -> dict:
             "p0_status": summary["p0_status"],
             "p0_reasons": summary["p0_reasons"],
             "errors_by_source": summary["errors_by_source"],
+            "change_summary": change_summary,
             "university_counters": summary["university_counters"],
             "connector_counters": summary["connector_counters"],
             "scan_week": datetime.now(timezone.utc).strftime("%G-W%V"),

@@ -47,8 +47,14 @@ Este roadmap prioriza cerrar brechas del PRD sin perder velocidad de entrega.
 - Reglas para mapear variaciones de nombres de programas/departamentos.
 
 ### 6) Backfill histórico inicial
-- Ejecutar corridas controladas para generar historial base de snapshots.
-- Establecer baseline para tendencias de cambios.
+- Ejecutar corridas controladas para generar historial base de snapshots (`run_backfill.py`).
+- Definir ventana operativa de 4–8 semanas (default recomendado: 6).
+- Definir frecuencia por fuente para controlar carga:
+  - semanal: `google_scholar`, `arxiv`, `rss`, `university`
+  - quincenal: `github`, `cnki`, `baidu_scholar`
+- Etiquetar snapshots de backfill en `run_metadata` para separarlos de producción.
+- Persistir y validar `change_summary` por snapshot para monitorear estabilidad de diffs.
+- Aplicar criterio de corte si la calidad de extracción cae bajo umbral.
 
 ---
 

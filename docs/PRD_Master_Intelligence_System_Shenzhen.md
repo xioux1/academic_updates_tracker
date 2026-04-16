@@ -344,3 +344,5 @@ Candidato internacional que quiere optimizar admisión + calidad de vida + valor
 ### Próximos pasos
 - Ver `docs/NEXT_STEPS.md` para roadmap P0/P1/P2.
 - Ver `docs/IMPLEMENTATION_STATUS.md` para mapeo tarea-por-tarea.
+
+> Estado auditado del sistema actual: ver `docs/ESTADO_ACTUAL_SISTEMA.md`.

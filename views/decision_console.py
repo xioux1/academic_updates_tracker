@@ -5,6 +5,7 @@ import re
 from datetime import datetime, timezone
 
 import pandas as pd
+import scoring
 
 
 st.title("🧭 Decision Console")
@@ -112,6 +113,16 @@ def _ranking_guard(components):
     }
 
 
+def _subscores_from_components(components: dict) -> dict:
+    return {
+        "strategic_fit": _to_float(components.get("strategic_fit"), default=0.0),
+        "admission_fit": _to_float(components.get("admission_fit"), default=0.0),
+        "lifestyle_fit": _to_float(components.get("lifestyle_fit"), default=0.0),
+        "contact_leverage": _to_float(components.get("contact_leverage"), default=0.0),
+        "information_confidence": _to_float(components.get("information_confidence"), default=0.0),
+    }
+
+
 # -----------------------------------------------------------------------------
 # Carga base
 # -----------------------------------------------------------------------------
@@ -146,7 +157,10 @@ try:
             MAX(CASE WHEN rn=1 THEN total_score END) AS latest_score,
             MAX(CASE WHEN rn=1 THEN components END) AS latest_components,
             MAX(CASE WHEN rn=1 THEN computed_at END) AS latest_at,
+            MAX(CASE WHEN rn=1 THEN weights_version END) AS latest_weights_version,
+            MAX(CASE WHEN rn=1 THEN weights_profile_id END) AS latest_weights_profile_id,
             MAX(CASE WHEN rn=2 THEN total_score END) AS previous_score,
+            MAX(CASE WHEN rn=2 THEN components END) AS previous_components,
             MAX(CASE WHEN rn=2 THEN computed_at END) AS previous_at
         FROM ranked
         GROUP BY entity_id
@@ -296,6 +310,55 @@ st.divider()
 # -----------------------------------------------------------------------------
 # Top-N programas por overall_score
 # -----------------------------------------------------------------------------
+profiles = db.list_user_profiles(cfg.DB_PATH)
+active_profile = db.get_active_user_profile(cfg.DB_PATH)
+active_weights, active_weights_meta = scoring.resolve_weights_for_profile(active_profile)
+compare_enabled = False
+compare_weights = None
+compare_label = ""
+
+st.subheader("⚖️ Escenario de pesos activo")
+st.caption(
+    "El `overall_score` mostrado usa el perfil activo. "
+    "Puedes comparar en memoria con otro perfil sin persistir cambios."
+)
+
+if active_profile:
+    active_name = active_profile.get("display_name") or active_profile.get("user_key")
+    st.info(
+        f"Perfil activo: **{active_name}** · versión **{active_weights_meta['weights_version']}**"
+        + (" · fallback PRD aplicado" if active_weights_meta["fallback_used"] else "")
+    )
+else:
+    st.warning("No hay perfil activo guardado. Se usan pesos default del PRD.")
+
+compare_candidates = [
+    p for p in profiles
+    if not active_profile or p["id"] != active_profile["id"]
+]
+compare_enabled = st.checkbox(
+    "Comparar contra otro perfil (A vs B)",
+    value=False,
+    disabled=not bool(compare_candidates),
+)
+if compare_enabled and compare_candidates:
+    compare_id = st.selectbox(
+        "Perfil de comparación (B)",
+        options=[p["id"] for p in compare_candidates],
+        format_func=lambda pid: next(
+            (p.get("display_name") or p.get("user_key") or str(pid) for p in compare_candidates if p["id"] == pid),
+            str(pid),
+        ),
+    )
+    compare_profile = next((p for p in compare_candidates if p["id"] == compare_id), None)
+    compare_weights, compare_meta = scoring.resolve_weights_for_profile(compare_profile)
+    compare_label = compare_profile.get("display_name") or compare_profile.get("user_key") or "Perfil B"
+    if compare_meta["fallback_used"]:
+        st.warning(
+            f"Perfil de comparación inválido ({compare_meta['validation']['reason']}). "
+            "Se usa fallback PRD."
+        )
+
 st.subheader("🏆 Top-N programas actuales")
 if blocked_programs_count > 0 and not show_blocked:
     st.info(
@@ -308,20 +371,33 @@ for p in filtered_programs:
     pid = p["id"]
     score_info = score_map.get(pid, {})
     latest_score = _to_float(score_info.get("latest_score"), default=0.0)
-    prev_score = _to_float(score_info.get("previous_score"), default=0.0)
-    delta = latest_score - prev_score if score_info.get("previous_score") is not None else 0.0
     components = _loads(score_info.get("latest_components"))
+    previous_components = _loads(score_info.get("previous_components"))
+    recalculated_overall = scoring.compute_overall_score(_subscores_from_components(components), active_weights)
+    if previous_components:
+        previous_recalculated = scoring.compute_overall_score(_subscores_from_components(previous_components), active_weights)
+    else:
+        previous_recalculated = _to_float(score_info.get("previous_score"), default=0.0)
+    delta = recalculated_overall - previous_recalculated if score_info.get("previous_score") is not None else 0.0
     confidence = _find_confidence(components)
     guard = _ranking_guard(components)
     evidence_url = _extract_evidence_url(p)
     deadline = _extract_deadline(p)
     if guard["blocked"] and not show_blocked:
         continue
+
+    comparison_overall = None
+    if compare_enabled and compare_weights is not None:
+        comparison_overall = scoring.compute_overall_score(_subscores_from_components(components), compare_weights)
+
     ranked.append({
         "program_id": pid,
         "program": p.get("name"),
         "university": p.get("university_name"),
-        "overall_score": round(latest_score, 3),
+        "overall_score": round(recalculated_overall, 3),
+        "stored_score": round(latest_score, 3),
+        "stored_weights_version": score_info.get("latest_weights_version") or components.get("weights_version") or "n/a",
+        "stored_weights_profile_id": score_info.get("latest_weights_profile_id") or components.get("weights_profile_id"),
         "delta": round(delta, 3),
         "confidence": round(confidence, 3),
         "deadline": deadline.strftime("%Y-%m-%d") if deadline else "N/A",
@@ -331,6 +407,8 @@ for p in filtered_programs:
         "primary_issue": guard["primary_issue"],
         "threshold": round(guard["threshold"], 3),
         "sub_scores": components,
+        "comparison_overall": round(comparison_overall, 3) if comparison_overall is not None else None,
+        "comparison_gap": round(recalculated_overall - comparison_overall, 3) if comparison_overall is not None else None,
     })
 
 ranked = sorted(ranked, key=lambda x: x["overall_score"], reverse=True)[:top_n]
@@ -346,15 +424,32 @@ else:
             "Confianza": r["confidence"],
             "Estado ranking": "🚫 Bloqueado" if r["blocked"] else "✅ Habilitado",
             "Deadline": r["deadline"],
+            "Escenario B": r["comparison_overall"] if compare_enabled else None,
+            "Gap A-B": r["comparison_gap"] if compare_enabled else None,
         }
         for r in ranked
     ])
+    if not compare_enabled:
+        df_top = df_top.drop(columns=["Escenario B", "Gap A-B"])
     st.dataframe(df_top, use_container_width=True, hide_index=True)
 
     st.markdown("**Explicabilidad por fila**")
     for i, row in enumerate(ranked, start=1):
         with st.expander(f"#{i} · {row['program']} ({row['university']})"):
-            st.write(f"**Overall score:** {row['overall_score']} · **Confianza:** {row['confidence']}")
+            st.write(
+                f"**Overall score (perfil activo):** {row['overall_score']} · "
+                f"**Confianza:** {row['confidence']}"
+            )
+            st.caption(
+                f"Score persistido: {row['stored_score']} "
+                f"(weights_version={row['stored_weights_version']}, "
+                f"weights_profile_id={row['stored_weights_profile_id']})."
+            )
+            if compare_enabled and row["comparison_overall"] is not None:
+                st.info(
+                    f"Escenario B ({compare_label}): {row['comparison_overall']} · "
+                    f"Gap A-B: {row['comparison_gap']}"
+                )
             if row["blocked"]:
                 st.error(
                     "Programa bloqueado para ranking. "

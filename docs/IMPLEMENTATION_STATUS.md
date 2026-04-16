@@ -5,7 +5,7 @@ Este documento resume qué partes del PRD ya están implementadas en el reposito
 ## Resumen ejecutivo
 
 - **Completado**: las 6 tareas iniciales del plan de arranque **y el cierre de P0 de scoring PRD**.
-- **Parcial**: hardening de conectores por universidad, normalización EN/ZH y observabilidad persistente.
+- **Parcial**: hardening de conectores por universidad (SUSTech/HITSZ/SZU con perfiles dedicados), normalización EN/ZH y observabilidad persistente.
 - **Pendiente**: escalado operativo (alertas, métricas avanzadas, calidad por fuente en dashboard).
 
 ---

@@ -7,9 +7,11 @@ from scraper import (
     _build_program_contract,
     _evidence_rows_for_program,
     _extract_critical_fields_from_text,
+    _extract_programs_with_connector,
     _extract_with_regex,
     _extract_with_table_fallback,
     _normalize_table_rows,
+    DOMAIN_RETRY_POLICY,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -108,3 +110,28 @@ def test_evidence_rows_contract_maps_all_critical_fields_to_evidence_snippets_ro
     assert {row["field_name"] for row in rows} == set(CRITICAL_FIELD_KEYS)
     assert all(row["source_document_id"] == 9 for row in rows)
     assert all(row["entity_id"] == 10 for row in rows)
+
+
+def test_szu_connector_uses_dedicated_selectors_and_extracts_program_fields():
+    html = _read_fixture("szu_program.html")
+    soup = BeautifulSoup(html, "html.parser")
+
+    programs, metadata = _extract_programs_with_connector(
+        "Shenzhen University",
+        soup,
+        "https://www.szu.edu.cn/en/graduate-program",
+    )
+
+    assert programs
+    fields = programs[0]["critical_fields"]
+    assert fields["language"].lower() == "english"
+    assert fields["duration"].lower() == "2 years"
+    assert fields["tuition"].lower().startswith("rmb 56,000")
+    assert fields["deadlines"] == "March 18, 2027"
+    assert metadata["selectors_used"] == ["#vsb_content"]
+
+
+def test_retry_policy_includes_shenzhen_university_domain_profile():
+    assert "www.szu.edu.cn" in DOMAIN_RETRY_POLICY
+    assert DOMAIN_RETRY_POLICY["www.szu.edu.cn"]["attempts"] >= 3
+    assert DOMAIN_RETRY_POLICY["www.szu.edu.cn"]["backoff_factor"] > 1

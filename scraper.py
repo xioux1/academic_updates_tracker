@@ -48,6 +48,7 @@ log = logging.getLogger(__name__)
 SEED_PRIORITY_ORDER = [
     "SUSTech",
     "Harbin Institute of Technology, Shenzhen",
+    "Shenzhen University",
 ]
 
 CONNECTOR_VERSION = "2026.04.16"
@@ -326,12 +327,18 @@ CONNECTOR_REGISTRY: dict[str, dict[str, Any]] = {
         "fallback_selectors": ["body"],
         "normalizers": ["regex", "table"],
     },
+    "Shenzhen University": {
+        "selectors": ["main", "#vsb_content", ".article-content", ".v_news_content"],
+        "fallback_selectors": ["#content", "body"],
+        "normalizers": ["regex", "table"],
+    },
 }
 
 
 DOMAIN_RETRY_POLICY = {
     "www.sustech.edu.cn": {"attempts": 3, "backoff_factor": 1.3},
     "www.hitsz.edu.cn": {"attempts": 4, "backoff_factor": 1.6},
+    "www.szu.edu.cn": {"attempts": 3, "backoff_factor": 1.4},
 }
 
 

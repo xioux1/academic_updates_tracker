@@ -114,6 +114,149 @@ CREATE TABLE IF NOT EXISTS scan_history (
     findings_new        INTEGER NOT NULL DEFAULT 0,
     errors_json         TEXT
 );
+
+CREATE TABLE IF NOT EXISTS universities (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT NOT NULL,
+    slug             TEXT UNIQUE,
+    country          TEXT,
+    city             TEXT,
+    website          TEXT,
+    official_data    TEXT NOT NULL DEFAULT '{}',
+    derived_data     TEXT NOT NULL DEFAULT '{}',
+    inferred_data    TEXT NOT NULL DEFAULT '{}',
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS schools_departments (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    university_id    INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+    name             TEXT NOT NULL,
+    type             TEXT NOT NULL DEFAULT 'department'
+                       CHECK(type IN ('school','department','institute','center')),
+    official_data    TEXT NOT NULL DEFAULT '{}',
+    derived_data     TEXT NOT NULL DEFAULT '{}',
+    inferred_data    TEXT NOT NULL DEFAULT '{}',
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    UNIQUE(university_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS programs (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    university_id    INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+    school_id        INTEGER REFERENCES schools_departments(id) ON DELETE SET NULL,
+    name             TEXT NOT NULL,
+    degree_level     TEXT,
+    delivery_mode    TEXT,
+    status           TEXT,
+    official_data    TEXT NOT NULL DEFAULT '{}',
+    derived_data     TEXT NOT NULL DEFAULT '{}',
+    inferred_data    TEXT NOT NULL DEFAULT '{}',
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    UNIQUE(university_id, school_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS faculty (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    university_id    INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+    school_id        INTEGER REFERENCES schools_departments(id) ON DELETE SET NULL,
+    name             TEXT NOT NULL,
+    title            TEXT,
+    email            TEXT,
+    profile_url      TEXT,
+    official_data    TEXT NOT NULL DEFAULT '{}',
+    derived_data     TEXT NOT NULL DEFAULT '{}',
+    inferred_data    TEXT NOT NULL DEFAULT '{}',
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    UNIQUE(university_id, school_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS source_documents (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type      TEXT NOT NULL,
+    entity_id        INTEGER NOT NULL,
+    source_name      TEXT,
+    source_url       TEXT NOT NULL,
+    checksum         TEXT,
+    official_data    TEXT NOT NULL DEFAULT '{}',
+    derived_data     TEXT NOT NULL DEFAULT '{}',
+    inferred_data    TEXT NOT NULL DEFAULT '{}',
+    fetched_at       TEXT NOT NULL,
+    created_at       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS evidence_snippets (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_document_id INTEGER NOT NULL REFERENCES source_documents(id) ON DELETE CASCADE,
+    entity_type      TEXT NOT NULL,
+    entity_id        INTEGER NOT NULL,
+    snippet_text     TEXT NOT NULL,
+    locator          TEXT,
+    confidence_score REAL,
+    official_data    TEXT NOT NULL DEFAULT '{}',
+    derived_data     TEXT NOT NULL DEFAULT '{}',
+    inferred_data    TEXT NOT NULL DEFAULT '{}',
+    created_at       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS snapshots (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type      TEXT NOT NULL,
+    entity_id        INTEGER NOT NULL,
+    payload          TEXT NOT NULL,
+    created_at       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_records (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type      TEXT NOT NULL,
+    entity_id        INTEGER NOT NULL,
+    change_type      TEXT NOT NULL,
+    detected_at      TEXT NOT NULL,
+    details          TEXT,
+    official_data    TEXT NOT NULL DEFAULT '{}',
+    derived_data     TEXT NOT NULL DEFAULT '{}',
+    inferred_data    TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS score_breakdowns (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type      TEXT NOT NULL,
+    entity_id        INTEGER NOT NULL,
+    score_name       TEXT NOT NULL,
+    total_score      REAL,
+    components       TEXT NOT NULL DEFAULT '{}',
+    computed_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_profiles (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_key         TEXT NOT NULL UNIQUE,
+    display_name     TEXT,
+    email            TEXT,
+    role             TEXT,
+    official_data    TEXT NOT NULL DEFAULT '{}',
+    derived_data     TEXT NOT NULL DEFAULT '{}',
+    inferred_data    TEXT NOT NULL DEFAULT '{}',
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_programs_uni_school_name
+    ON programs(university_id, school_id, name);
+
+CREATE INDEX IF NOT EXISTS idx_faculty_uni_school_name
+    ON faculty(university_id, school_id, name);
+
+CREATE INDEX IF NOT EXISTS idx_audit_entity_detected
+    ON audit_records(entity_type, entity_id, detected_at);
+
+CREATE INDEX IF NOT EXISTS idx_snapshots_created_at
+    ON snapshots(created_at);
 """
 
 SEED_PROFESSORS = [
@@ -254,6 +397,174 @@ def _seed_sources(conn: sqlite3.Connection) -> None:
                VALUES (?,?,?,?,?)""",
             (s["name"], s["url_pattern"], s["type"], s["active"], s["supports_chinese"]),
         )
+
+
+# ---------------------------------------------------------------------------
+# PRD entities CRUD
+# ---------------------------------------------------------------------------
+
+def _json_blob(data: Optional[dict]) -> str:
+    return json.dumps(data or {}, ensure_ascii=False)
+
+
+def add_university(data: dict, db_path: str = DB_PATH) -> int:
+    ts = now_iso()
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO universities
+               (name, slug, country, city, website,
+                official_data, derived_data, inferred_data,
+                created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                data["name"],
+                data.get("slug"),
+                data.get("country"),
+                data.get("city"),
+                data.get("website"),
+                _json_blob(data.get("official_data")),
+                _json_blob(data.get("derived_data")),
+                _json_blob(data.get("inferred_data")),
+                ts,
+                ts,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_universities(db_path: str = DB_PATH) -> list[dict]:
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute("SELECT * FROM universities ORDER BY name").fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def add_program(data: dict, db_path: str = DB_PATH) -> int:
+    ts = now_iso()
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO programs
+               (university_id, school_id, name, degree_level, delivery_mode, status,
+                official_data, derived_data, inferred_data, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                data["university_id"],
+                data.get("school_id"),
+                data["name"],
+                data.get("degree_level"),
+                data.get("delivery_mode"),
+                data.get("status"),
+                _json_blob(data.get("official_data")),
+                _json_blob(data.get("derived_data")),
+                _json_blob(data.get("inferred_data")),
+                ts,
+                ts,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_programs(db_path: str = DB_PATH, university_id: Optional[int] = None) -> list[dict]:
+    conn = get_connection(db_path)
+    try:
+        if university_id is None:
+            rows = conn.execute("SELECT * FROM programs ORDER BY name").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM programs WHERE university_id=? ORDER BY name",
+                (university_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def add_faculty(data: dict, db_path: str = DB_PATH) -> int:
+    ts = now_iso()
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO faculty
+               (university_id, school_id, name, title, email, profile_url,
+                official_data, derived_data, inferred_data, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                data["university_id"],
+                data.get("school_id"),
+                data["name"],
+                data.get("title"),
+                data.get("email"),
+                data.get("profile_url"),
+                _json_blob(data.get("official_data")),
+                _json_blob(data.get("derived_data")),
+                _json_blob(data.get("inferred_data")),
+                ts,
+                ts,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_faculty(db_path: str = DB_PATH, university_id: Optional[int] = None) -> list[dict]:
+    conn = get_connection(db_path)
+    try:
+        if university_id is None:
+            rows = conn.execute("SELECT * FROM faculty ORDER BY name").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM faculty WHERE university_id=? ORDER BY name",
+                (university_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def add_snapshot(data: dict, db_path: str = DB_PATH) -> int:
+    ts = data.get("created_at") or now_iso()
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO snapshots (entity_type, entity_id, payload, created_at)
+               VALUES (?,?,?,?)""",
+            (
+                data["entity_type"],
+                data["entity_id"],
+                _json_blob(data.get("payload")),
+                ts,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_snapshots(entity_type: str, entity_id: int, db_path: str = DB_PATH) -> list[dict]:
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT * FROM snapshots
+               WHERE entity_type=? AND entity_id=?
+               ORDER BY created_at DESC""",
+            (entity_type, entity_id),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

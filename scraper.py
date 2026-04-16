@@ -30,6 +30,7 @@ import feedparser
 import arxiv
 
 import os
+from scoring import score_snapshot
 
 from config import (
     BROWSER_HEADERS,
@@ -923,6 +924,9 @@ def run_full_scan(db_path: str = None) -> dict:
         "entities_removed": 0,
         "entity_changes_by_type": {},
         "inconsistencies_detected": 0,
+        "programs_scored": 0,
+        "programs_omitted": 0,
+        "score_omitted_cases": [],
         "errors": [],
     }
     snapshot_id = db.create_snapshot(
@@ -1066,5 +1070,19 @@ def run_full_scan(db_path: str = None) -> dict:
     summary["entities_updated"] = change_summary["totals"]["modified"]
     summary["entities_removed"] = change_summary["totals"]["removed"]
     summary["entity_changes_by_type"] = change_summary["by_entity"]
+
+    scoring_summary = score_snapshot(snapshot_id=snapshot_id, db_path=db_path)
+    summary["programs_scored"] = scoring_summary.get("programs_scored", 0)
+    summary["programs_omitted"] = scoring_summary.get("programs_omitted", 0)
+    summary["score_omitted_cases"] = scoring_summary.get("omitted_cases", [])
+    db.update_snapshot_summary(
+        snapshot_id,
+        {
+            "programs_scored": summary["programs_scored"],
+            "programs_omitted": summary["programs_omitted"],
+            "score_omitted_cases": summary["score_omitted_cases"],
+        },
+        db_path,
+    )
     db.close_snapshot(snapshot_id, db_path)
     return summary

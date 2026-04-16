@@ -21,7 +21,9 @@ def test_normalize_date_to_iso():
     assert normalize_date("15 Jan 2027")["normalized"] == "2027-01-15"
     assert normalize_date("January 5, 2027")["normalized"] == "2027-01-05"
     assert normalize_date("2027年3月1日")["normalized"] == "2027-03-01"
+    assert normalize_date("2027/3/1")["normalized"] == "2027-03-01"
     assert normalize_date("rolling basis")["normalized"] is None
+    assert normalize_date("2027-03-01 to 2027-03-10")["ambiguous"] is True
 
 
 def test_normalize_tuition_to_amount_plus_currency():
@@ -39,15 +41,40 @@ def test_normalize_tuition_to_amount_plus_currency():
         "periodicity": "annual",
     }
     assert zh_tuition["ambiguous"] is False
+    per_semester = normalize_tuition("USD 8,500 per semester")
+    assert per_semester["normalized"] == {
+        "amount": 8500.0,
+        "currency": "USD",
+        "periodicity": "semester",
+    }
+    total_tuition = normalize_tuition("RMB 120,000 total")
+    assert total_tuition["normalized"] == {
+        "amount": 120000.0,
+        "currency": "CNY",
+        "periodicity": "total",
+    }
+    ambiguous_range = normalize_tuition("USD 12,000-18,000 /year")
+    assert ambiguous_range["normalized"] is None
+    assert ambiguous_range["ambiguous"] is True
 
 
 def test_variant_mapping_for_program_and_department_names():
     assert normalize_program_name("M.Sc. in Data Science")["normalized"] == "MSc Data Science"
     assert normalize_department_name("Dept. of Computer Science")["normalized"] == "Department of Computer Science"
     assert normalize_program_name("人工智能硕士")["normalized"] == "MSc Artificial Intelligence"
+    assert normalize_program_name("Master of Science in Artificial Intelligence")["normalized"] == "MSc Artificial Intelligence"
+    assert normalize_program_name("M.Eng. in Electronic Information")["normalized"] == "MEng Electronic Information"
     assert (
         normalize_department_name("School of Computer Science & Engineering")["normalized"]
         == "School of Computer Science"
+    )
+    assert (
+        normalize_department_name("Computer Science and Engineering Department")["normalized"]
+        == "Department of Computer Science"
+    )
+    assert (
+        normalize_department_name("电子信息与电气工程学院")["normalized"]
+        == "School of Electronic and Information Engineering"
     )
 
 

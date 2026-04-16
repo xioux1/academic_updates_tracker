@@ -396,6 +396,8 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "score_breakdowns", "score_value", "REAL")
         _ensure_column(conn, "score_breakdowns", "explanation", "TEXT")
         _ensure_column(conn, "score_breakdowns", "confidence_score", "REAL")
+        _ensure_column(conn, "score_breakdowns", "weights_profile_id", "INTEGER")
+        _ensure_column(conn, "score_breakdowns", "weights_version", "TEXT")
         conn.commit()
 
         # Only seed if tables are empty
@@ -549,6 +551,8 @@ def upsert_score_breakdown(
     components: Optional[dict],
     explanation: str,
     confidence_score: Optional[float],
+    weights_profile_id: Optional[int] = None,
+    weights_version: Optional[str] = None,
     db_path: str = DB_PATH,
 ) -> int:
     """
@@ -574,13 +578,16 @@ def upsert_score_breakdown(
             _json_blob(components),
             explanation,
             confidence_score,
+            weights_profile_id,
+            weights_version,
             ts,
         )
         if existing:
             conn.execute(
                 """UPDATE score_breakdowns
                    SET snapshot_id=?, score_value=?, total_score=?, components=?,
-                       explanation=?, confidence_score=?, computed_at=?
+                       explanation=?, confidence_score=?, weights_profile_id=?,
+                       weights_version=?, computed_at=?
                    WHERE id=?""",
                 (*payload, existing["id"]),
             )
@@ -590,8 +597,9 @@ def upsert_score_breakdown(
         cur = conn.execute(
             """INSERT INTO score_breakdowns
                (entity_type, entity_id, score_name, snapshot_id, score_value, total_score,
-                components, explanation, confidence_score, computed_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                components, explanation, confidence_score, weights_profile_id,
+                weights_version, computed_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 entity_type,
                 entity_id,
@@ -601,6 +609,211 @@ def upsert_score_breakdown(
         )
         conn.commit()
         return cur.lastrowid
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# User profiles CRUD
+# ---------------------------------------------------------------------------
+
+def list_user_profiles(db_path: str = DB_PATH) -> list[dict]:
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM user_profiles
+            ORDER BY
+                CASE WHEN json_extract(derived_data, '$.is_active') = 1 THEN 0 ELSE 1 END,
+                updated_at DESC,
+                id DESC
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_user_profile(profile_id: int, db_path: str = DB_PATH) -> Optional[dict]:
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM user_profiles WHERE id=? LIMIT 1",
+            (profile_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_active_user_profile(db_path: str = DB_PATH) -> Optional[dict]:
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM user_profiles
+            WHERE json_extract(derived_data, '$.is_active') = 1
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if row:
+            return dict(row)
+    finally:
+        conn.close()
+
+    profiles = list_user_profiles(db_path)
+    if profiles:
+        set_active_user_profile(profiles[0]["id"], db_path)
+        return get_user_profile(profiles[0]["id"], db_path)
+    return None
+
+
+def add_user_profile(data: dict, db_path: str = DB_PATH) -> int:
+    ts = now_iso()
+    user_key = str(data.get("user_key") or "").strip()
+    if not user_key:
+        raise ValueError("user_key is required")
+
+    derived_data = _json_loads(data.get("derived_data"))
+    incoming_weights = data.get("weights")
+    if isinstance(incoming_weights, dict):
+        derived_data["weights"] = incoming_weights
+    if "weights_version" in data:
+        derived_data["weights_version"] = str(data["weights_version"])
+    is_active = bool(data.get("is_active", False))
+    derived_data["is_active"] = 1 if is_active else 0
+
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            """
+            INSERT INTO user_profiles
+                (user_key, display_name, email, role, official_data, derived_data,
+                 inferred_data, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                user_key,
+                data.get("display_name"),
+                data.get("email"),
+                data.get("role"),
+                _json_blob(data.get("official_data")),
+                _json_blob(derived_data),
+                _json_blob(data.get("inferred_data")),
+                ts,
+                ts,
+            ),
+        )
+        new_id = cur.lastrowid
+        if is_active:
+            _deactivate_other_profiles(conn, new_id, ts)
+        conn.commit()
+        return new_id
+    finally:
+        conn.close()
+
+
+def _deactivate_other_profiles(conn: sqlite3.Connection, active_profile_id: int, ts: str) -> None:
+    rows = conn.execute(
+        "SELECT id, derived_data FROM user_profiles WHERE id <> ?",
+        (active_profile_id,),
+    ).fetchall()
+    for row in rows:
+        derived = _json_loads(row["derived_data"])
+        if int(derived.get("is_active", 0)) != 1:
+            continue
+        derived["is_active"] = 0
+        conn.execute(
+            "UPDATE user_profiles SET derived_data=?, updated_at=? WHERE id=?",
+            (_json_blob(derived), ts, row["id"]),
+        )
+
+
+def update_user_profile(profile_id: int, data: dict, db_path: str = DB_PATH) -> None:
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM user_profiles WHERE id=? LIMIT 1",
+            (profile_id,),
+        ).fetchone()
+        if not row:
+            return
+
+        current = dict(row)
+        derived_data = _json_loads(current.get("derived_data"))
+
+        if isinstance(data.get("weights"), dict):
+            derived_data["weights"] = data["weights"]
+        if "weights_version" in data:
+            derived_data["weights_version"] = str(data["weights_version"])
+        if "is_active" in data:
+            derived_data["is_active"] = 1 if data["is_active"] else 0
+
+        fields = {
+            "user_key": data["user_key"] if "user_key" in data else current.get("user_key"),
+            "display_name": data["display_name"] if "display_name" in data else current.get("display_name"),
+            "email": data["email"] if "email" in data else current.get("email"),
+            "role": data["role"] if "role" in data else current.get("role"),
+            "official_data": _json_blob(
+                data["official_data"] if "official_data" in data else _json_loads(current.get("official_data"))
+            ),
+            "derived_data": _json_blob(derived_data),
+            "inferred_data": _json_blob(
+                data["inferred_data"] if "inferred_data" in data else _json_loads(current.get("inferred_data"))
+            ),
+            "updated_at": now_iso(),
+        }
+        conn.execute(
+            """
+            UPDATE user_profiles
+            SET user_key=?, display_name=?, email=?, role=?, official_data=?,
+                derived_data=?, inferred_data=?, updated_at=?
+            WHERE id=?
+            """,
+            (
+                fields["user_key"],
+                fields["display_name"],
+                fields["email"],
+                fields["role"],
+                fields["official_data"],
+                fields["derived_data"],
+                fields["inferred_data"],
+                fields["updated_at"],
+                profile_id,
+            ),
+        )
+        if derived_data.get("is_active") == 1:
+            _deactivate_other_profiles(conn, profile_id, fields["updated_at"])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_active_user_profile(profile_id: int, db_path: str = DB_PATH) -> None:
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute("SELECT id, derived_data FROM user_profiles").fetchall()
+        ts = now_iso()
+        for row in rows:
+            derived = _json_loads(row["derived_data"])
+            derived["is_active"] = 1 if row["id"] == profile_id else 0
+            conn.execute(
+                "UPDATE user_profiles SET derived_data=?, updated_at=? WHERE id=?",
+                (_json_blob(derived), ts, row["id"]),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_user_profile(profile_id: int, db_path: str = DB_PATH) -> None:
+    conn = get_connection(db_path)
+    try:
+        conn.execute("DELETE FROM user_profiles WHERE id=?", (profile_id,))
+        conn.commit()
     finally:
         conn.close()
 

@@ -10,6 +10,16 @@ from typing import Optional
 import database as db
 import config as cfg
 
+DEFAULT_WEIGHTS = {
+    "strategic_fit": 0.30,
+    "admission_fit": 0.25,
+    "lifestyle_fit": 0.20,
+    "contact_leverage": 0.15,
+    "information_confidence": 0.10,
+}
+
+WEIGHT_KEYS = tuple(DEFAULT_WEIGHTS.keys())
+
 
 def _loads(raw: Optional[str]) -> dict:
     if not raw:
@@ -23,6 +33,59 @@ def _loads(raw: Optional[str]) -> dict:
 
 def _clip(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, float(value)))
+
+
+def validate_weights(raw_weights: Optional[dict]) -> tuple[dict, dict]:
+    if not isinstance(raw_weights, dict):
+        return dict(DEFAULT_WEIGHTS), {"valid": False, "reason": "missing_weights"}
+
+    normalized: dict[str, float] = {}
+    for key in WEIGHT_KEYS:
+        if key not in raw_weights:
+            return dict(DEFAULT_WEIGHTS), {"valid": False, "reason": f"missing_key:{key}"}
+        try:
+            value = float(raw_weights[key])
+        except (TypeError, ValueError):
+            return dict(DEFAULT_WEIGHTS), {"valid": False, "reason": f"invalid_number:{key}"}
+        if value < 0.0 or value > 1.0:
+            return dict(DEFAULT_WEIGHTS), {"valid": False, "reason": f"out_of_range:{key}"}
+        normalized[key] = value
+
+    total = sum(normalized.values())
+    if abs(total - 1.0) > 0.0001:
+        return dict(DEFAULT_WEIGHTS), {"valid": False, "reason": f"sum_must_be_1:{total:.6f}"}
+
+    rounded = {k: round(v, 4) for k, v in normalized.items()}
+    return rounded, {"valid": True, "reason": "ok"}
+
+
+def resolve_weights_for_profile(profile: Optional[dict]) -> tuple[dict, dict]:
+    if not profile:
+        return dict(DEFAULT_WEIGHTS), {
+            "profile_id": None,
+            "profile_key": "default",
+            "weights_version": "default-v1",
+            "fallback_used": True,
+            "validation": {"valid": False, "reason": "missing_profile"},
+        }
+    derived = _loads(profile.get("derived_data"))
+    weights, validation = validate_weights(derived.get("weights"))
+    version = str(derived.get("weights_version") or "v1")
+    metadata = {
+        "profile_id": profile.get("id"),
+        "profile_key": profile.get("user_key"),
+        "weights_version": version,
+        "fallback_used": not validation.get("valid"),
+        "validation": validation,
+    }
+    return weights, metadata
+
+
+def compute_overall_score(components: dict, weights: dict) -> float:
+    total = 0.0
+    for key in WEIGHT_KEYS:
+        total += float(weights.get(key, 0.0)) * _clip(float(components.get(key, 0.0)))
+    return round(total, 4)
 
 
 def admission_fit(program: dict) -> float:
@@ -184,6 +247,9 @@ def score_snapshot(snapshot_id: int, db_path: str) -> dict:
     finally:
         conn.close()
 
+    active_profile = db.get_active_user_profile(db_path)
+    active_weights, weights_meta = resolve_weights_for_profile(active_profile)
+
     for program in programs:
         program_id = program["id"]
         if str(program.get("status") or "active").lower() not in ("active", ""):
@@ -200,26 +266,33 @@ def score_snapshot(snapshot_id: int, db_path: str) -> dict:
         i_conf = information_confidence(program, evidence_count, inconsistent)
         rankability = _build_rankability_metadata(i_conf, evidence_count, inconsistent)
 
-        overall = (
-            (0.28 * a_fit)
-            + (0.24 * s_fit)
-            + (0.14 * l_fit)
-            + (0.16 * c_lev)
-            + (0.18 * i_conf)
-        )
-        components = {
+        sub_scores = {
             "admission_fit": round(a_fit, 4),
             "strategic_fit": round(s_fit, 4),
             "lifestyle_fit": round(l_fit, 4),
             "contact_leverage": round(c_lev, 4),
             "information_confidence": round(i_conf, 4),
+        }
+        overall = compute_overall_score(sub_scores, active_weights)
+        components = {
+            **sub_scores,
             "confidence_score": round(i_conf, 4),
             "evidence_count": evidence_count,
+            "weights_used": active_weights,
+            "weights_profile_id": weights_meta["profile_id"],
+            "weights_profile_key": weights_meta["profile_key"],
+            "weights_version": weights_meta["weights_version"],
+            "weights_fallback_used": weights_meta["fallback_used"],
+            "weights_validation": weights_meta["validation"],
             **rankability,
         }
         explanation = (
             "Weighted blend of admission, strategic, lifestyle, contact leverage, "
             "and information confidence sub-scores."
+        )
+        explanation += (
+            f" Weights profile={weights_meta['profile_key'] or 'default'}"
+            f" version={weights_meta['weights_version']}."
         )
         if rankability["ranking_blocked"]:
             explanation += f" {rankability['ranking_block_reason']}"
@@ -233,6 +306,8 @@ def score_snapshot(snapshot_id: int, db_path: str) -> dict:
             components=components,
             explanation=explanation,
             confidence_score=round(i_conf, 4),
+            weights_profile_id=weights_meta["profile_id"],
+            weights_version=weights_meta["weights_version"],
             db_path=db_path,
         )
         results["programs_scored"] += 1

@@ -20,6 +20,7 @@ import traceback
 import hashlib
 import sqlite3
 import time
+import random
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Generator, Optional
 from urllib.parse import quote_plus, urlencode, urljoin, urlparse
@@ -78,15 +79,94 @@ def _sleep(seconds: float = SCRAPER_DELAY_SECONDS) -> None:
     time.sleep(seconds)
 
 
-def _get(url: str, headers: Optional[dict] = None, timeout: int = 15) -> Optional[requests.Response]:
-    try:
-        h = {**BROWSER_HEADERS, **(headers or {})}
-        resp = requests.get(url, headers=h, timeout=timeout)
-        resp.raise_for_status()
-        return resp
-    except Exception as exc:
-        log.warning("GET %s failed: %s", url, exc)
-        return None
+DEFAULT_RETRY_POLICY = {
+    "attempts": 2,
+    "backoff_factor": 1.5,
+    "base_delay": 0.5,
+    "jitter_seconds": 0.25,
+}
+
+
+def _retry_policy_for_url(url: str) -> tuple[str, dict[str, float]]:
+    parsed = urlparse(url)
+    domain = (parsed.hostname or parsed.netloc or "").lower()
+    policy = dict(DEFAULT_RETRY_POLICY)
+    policy.update(DOMAIN_RETRY_POLICY.get(domain, {}))
+    return domain, policy
+
+
+def _get(
+    url: str,
+    headers: Optional[dict] = None,
+    timeout: int = 15,
+    *,
+    return_metadata: bool = False,
+    min_attempts: int = 1,
+) -> Optional[Any]:
+    h = {**BROWSER_HEADERS, **(headers or {})}
+    domain, policy = _retry_policy_for_url(url)
+    attempts = max(int(policy.get("attempts", 1)), int(min_attempts))
+    backoff_factor = max(float(policy.get("backoff_factor", 1.0)), 1.0)
+    base_delay = max(float(policy.get("base_delay", 0.0)), 0.0)
+    jitter_seconds = max(float(policy.get("jitter_seconds", 0.0)), 0.0)
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = requests.get(url, headers=h, timeout=timeout, allow_redirects=True)
+            status_code = resp.status_code
+            redirects = [item.url for item in resp.history] if resp.history else []
+            if status_code >= 500 or status_code == 429:
+                raise requests.HTTPError(f"status={status_code}")
+            resp.raise_for_status()
+            if return_metadata:
+                page_text = _normalize_whitespace(BeautifulSoup(resp.text, "html.parser").get_text(" ", strip=True))
+                return {
+                    "response": resp,
+                    "status_code": status_code,
+                    "redirect_chain": redirects,
+                    "empty_page": not bool(page_text),
+                    "attempts_used": attempt,
+                    "domain_policy": policy,
+                    "domain": domain,
+                    "final_status": "success",
+                }
+            return resp
+        except Exception as exc:
+            last_error = str(exc)
+            if attempt >= attempts:
+                break
+            wait_seconds = (base_delay * (backoff_factor ** (attempt - 1))) + random.uniform(0, jitter_seconds)
+            log.info(
+                "Retrying GET url=%s domain=%s attempt=%s/%s wait=%.2fs error=%s",
+                url,
+                domain,
+                attempt,
+                attempts,
+                wait_seconds,
+                exc,
+            )
+            time.sleep(wait_seconds)
+
+    log.warning(
+        "GET failed url=%s domain=%s attempts=%s final_status=failed error=%s",
+        url,
+        domain,
+        attempts,
+        last_error,
+    )
+    if return_metadata:
+        return {
+            "response": None,
+            "status_code": None,
+            "redirect_chain": [],
+            "empty_page": True,
+            "attempts_used": attempts,
+            "domain_policy": policy,
+            "domain": domain,
+            "final_status": "failed",
+        }
+    return None
 
 
 def _cutoff_date() -> datetime:
@@ -389,38 +469,10 @@ DOMAIN_RETRY_POLICY = {
 
 
 def _fetch_page_with_retry(url: str, timeout: int = 20) -> Optional[dict[str, Any]]:
-    domain = urlparse(url).netloc
-    policy = DOMAIN_RETRY_POLICY.get(domain, {"attempts": 2, "backoff_factor": 1.5})
-    attempts = policy["attempts"]
-    backoff_factor = policy["backoff_factor"]
-    delay = 0.5
-    last_error = None
-
-    for attempt in range(1, attempts + 1):
-        try:
-            resp = requests.get(url, headers=BROWSER_HEADERS, timeout=timeout, allow_redirects=True)
-            status_code = resp.status_code
-            redirects = [h.url for h in resp.history] if resp.history else []
-            if status_code >= 500:
-                raise requests.HTTPError(f"status={status_code}")
-            page_text = _normalize_whitespace(BeautifulSoup(resp.text, "html.parser").get_text(" ", strip=True))
-            return {
-                "response": resp,
-                "status_code": status_code,
-                "redirect_chain": redirects,
-                "empty_page": not bool(page_text),
-                "attempts_used": attempt,
-                "domain_policy": policy,
-            }
-        except Exception as exc:
-            last_error = str(exc)
-            if attempt >= attempts:
-                break
-            time.sleep(delay)
-            delay *= backoff_factor
-
-    log.warning("Failed to fetch %s after %s attempts: %s", url, attempts, last_error)
-    return None
+    result = _get(url, timeout=timeout, return_metadata=True, min_attempts=2)
+    if not result or not result.get("response"):
+        return None
+    return result
 
 
 def _extract_with_selector_fallback(

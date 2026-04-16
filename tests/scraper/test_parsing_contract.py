@@ -7,11 +7,13 @@ from scraper import (
     CRITICAL_FIELD_KEYS,
     _build_program_contract,
     _evidence_rows_for_program,
+    _fetch_page_with_retry,
     _extract_critical_fields_from_text,
     _extract_programs_with_connector,
     _extract_with_regex,
     _extract_with_table_fallback,
     _normalize_table_rows,
+    _retry_policy_for_url,
     DOMAIN_RETRY_POLICY,
 )
 
@@ -136,6 +138,53 @@ def test_retry_policy_includes_shenzhen_university_domain_profile():
     assert "www.szu.edu.cn" in DOMAIN_RETRY_POLICY
     assert DOMAIN_RETRY_POLICY["www.szu.edu.cn"]["attempts"] >= 3
     assert DOMAIN_RETRY_POLICY["www.szu.edu.cn"]["backoff_factor"] > 1
+
+
+def test_retry_policy_selection_uses_hostname_profile():
+    domain, policy = _retry_policy_for_url("https://www.hitsz.edu.cn/admissions/graduate")
+    assert domain == "www.hitsz.edu.cn"
+    assert policy["attempts"] == DOMAIN_RETRY_POLICY["www.hitsz.edu.cn"]["attempts"]
+    assert policy["backoff_factor"] == DOMAIN_RETRY_POLICY["www.hitsz.edu.cn"]["backoff_factor"]
+
+
+def test_fetch_retry_enforces_minimum_attempts(monkeypatch):
+    class _FakeResponse:
+        def __init__(self, status_code=200, text="ok"):
+            self.status_code = status_code
+            self.history = []
+            self.text = text
+
+        def raise_for_status(self):
+            return None
+
+    calls = {"count": 0, "sleep": 0}
+    original_policy = DOMAIN_RETRY_POLICY.get("example.edu")
+    DOMAIN_RETRY_POLICY["example.edu"] = {"attempts": 1, "backoff_factor": 1.0, "base_delay": 0.0, "jitter_seconds": 0.0}
+
+    def _fake_get(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise TimeoutError("temporary timeout")
+        return _FakeResponse()
+
+    def _fake_sleep(_seconds):
+        calls["sleep"] += 1
+
+    monkeypatch.setattr("scraper.requests.get", _fake_get)
+    monkeypatch.setattr("scraper.time.sleep", _fake_sleep)
+    monkeypatch.setattr("scraper.random.uniform", lambda _a, _b: 0.0)
+
+    result = _fetch_page_with_retry("https://example.edu/program", timeout=3)
+
+    assert result is not None
+    assert calls["count"] == 2
+    assert calls["sleep"] == 1
+    assert result["attempts_used"] == 2
+    assert result["final_status"] == "success"
+    if original_policy is None:
+        del DOMAIN_RETRY_POLICY["example.edu"]
+    else:
+        DOMAIN_RETRY_POLICY["example.edu"] = original_policy
 
 
 @pytest.mark.parametrize(

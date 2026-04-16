@@ -6,6 +6,7 @@ Handles schema creation, seeding, and CRUD for every table.
 import sqlite3
 import json
 import os
+import copy
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -114,6 +115,184 @@ CREATE TABLE IF NOT EXISTS scan_history (
     findings_new        INTEGER NOT NULL DEFAULT 0,
     errors_json         TEXT
 );
+
+CREATE TABLE IF NOT EXISTS universities (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT NOT NULL,
+    slug             TEXT UNIQUE,
+    country          TEXT,
+    city             TEXT,
+    website          TEXT,
+    official_data    TEXT NOT NULL DEFAULT '{}',
+    derived_data     TEXT NOT NULL DEFAULT '{}',
+    inferred_data    TEXT NOT NULL DEFAULT '{}',
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS schools_departments (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    university_id    INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+    name             TEXT NOT NULL,
+    type             TEXT NOT NULL DEFAULT 'department'
+                       CHECK(type IN ('school','department','institute','center')),
+    official_data    TEXT NOT NULL DEFAULT '{}',
+    derived_data     TEXT NOT NULL DEFAULT '{}',
+    inferred_data    TEXT NOT NULL DEFAULT '{}',
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    UNIQUE(university_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS programs (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    university_id    INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+    school_id        INTEGER REFERENCES schools_departments(id) ON DELETE SET NULL,
+    name             TEXT NOT NULL,
+    degree_level     TEXT,
+    delivery_mode    TEXT,
+    status           TEXT,
+    official_data    TEXT NOT NULL DEFAULT '{}',
+    derived_data     TEXT NOT NULL DEFAULT '{}',
+    inferred_data    TEXT NOT NULL DEFAULT '{}',
+    inconsistency_flag INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    UNIQUE(university_id, school_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS faculty (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    university_id    INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+    school_id        INTEGER REFERENCES schools_departments(id) ON DELETE SET NULL,
+    name             TEXT NOT NULL,
+    title            TEXT,
+    email            TEXT,
+    profile_url      TEXT,
+    official_data    TEXT NOT NULL DEFAULT '{}',
+    derived_data     TEXT NOT NULL DEFAULT '{}',
+    inferred_data    TEXT NOT NULL DEFAULT '{}',
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    UNIQUE(university_id, school_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS source_documents (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type      TEXT NOT NULL,
+    entity_id        INTEGER NOT NULL,
+    source_name      TEXT,
+    source_url       TEXT NOT NULL,
+    checksum         TEXT,
+    source_priority  INTEGER NOT NULL DEFAULT 0,
+    content_hash     TEXT,
+    official_data    TEXT NOT NULL DEFAULT '{}',
+    derived_data     TEXT NOT NULL DEFAULT '{}',
+    inferred_data    TEXT NOT NULL DEFAULT '{}',
+    fetched_at       TEXT NOT NULL,
+    created_at       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS evidence_snippets (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_document_id INTEGER NOT NULL REFERENCES source_documents(id) ON DELETE CASCADE,
+    entity_type      TEXT NOT NULL,
+    entity_id        INTEGER NOT NULL,
+    snippet_text     TEXT NOT NULL,
+    locator          TEXT,
+    confidence_score REAL,
+    official_data    TEXT NOT NULL DEFAULT '{}',
+    derived_data     TEXT NOT NULL DEFAULT '{}',
+    inferred_data    TEXT NOT NULL DEFAULT '{}',
+    created_at       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS snapshots (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type      TEXT NOT NULL,
+    entity_id        INTEGER NOT NULL,
+    payload          TEXT NOT NULL,
+    created_at       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS scan_snapshots (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at       TEXT NOT NULL,
+    closed_at        TEXT,
+    status           TEXT NOT NULL DEFAULT 'open'
+                       CHECK(status IN ('open','closed')),
+    run_metadata     TEXT NOT NULL DEFAULT '{}',
+    summary_json     TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS snapshot_entities (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_id      INTEGER NOT NULL REFERENCES scan_snapshots(id) ON DELETE CASCADE,
+    entity_type      TEXT NOT NULL,
+    entity_id        INTEGER NOT NULL,
+    payload          TEXT NOT NULL,
+    change_type      TEXT NOT NULL
+                       CHECK(change_type IN ('new','updated','deleted','unchanged')),
+    inconsistency_flag INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_records (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type      TEXT NOT NULL,
+    entity_id        INTEGER NOT NULL,
+    change_type      TEXT NOT NULL,
+    detected_at      TEXT NOT NULL,
+    details          TEXT,
+    official_data    TEXT NOT NULL DEFAULT '{}',
+    derived_data     TEXT NOT NULL DEFAULT '{}',
+    inferred_data    TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS score_breakdowns (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type      TEXT NOT NULL,
+    entity_id        INTEGER NOT NULL,
+    score_name       TEXT NOT NULL,
+    snapshot_id      INTEGER,
+    score_value      REAL,
+    total_score      REAL,
+    components       TEXT NOT NULL DEFAULT '{}',
+    explanation      TEXT,
+    confidence_score REAL,
+    computed_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_profiles (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_key         TEXT NOT NULL UNIQUE,
+    display_name     TEXT,
+    email            TEXT,
+    role             TEXT,
+    official_data    TEXT NOT NULL DEFAULT '{}',
+    derived_data     TEXT NOT NULL DEFAULT '{}',
+    inferred_data    TEXT NOT NULL DEFAULT '{}',
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_programs_uni_school_name
+    ON programs(university_id, school_id, name);
+
+CREATE INDEX IF NOT EXISTS idx_faculty_uni_school_name
+    ON faculty(university_id, school_id, name);
+
+CREATE INDEX IF NOT EXISTS idx_audit_entity_detected
+    ON audit_records(entity_type, entity_id, detected_at);
+
+CREATE INDEX IF NOT EXISTS idx_snapshots_created_at
+    ON snapshots(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_snapshot_entities_snapshot
+    ON snapshot_entities(snapshot_id, entity_type, entity_id);
+
+CREATE INDEX IF NOT EXISTS idx_score_breakdowns_lookup
+    ON score_breakdowns(entity_type, entity_id, score_name, snapshot_id, computed_at);
 """
 
 SEED_PROFESSORS = [
@@ -209,6 +388,16 @@ def init_db(db_path: str = DB_PATH) -> None:
     conn = get_connection(db_path)
     try:
         conn.executescript(SCHEMA_SQL)
+        # Lightweight forward-compatible migrations for existing DB files.
+        _ensure_column(conn, "source_documents", "source_priority", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "source_documents", "content_hash", "TEXT")
+        _ensure_column(conn, "programs", "inconsistency_flag", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "score_breakdowns", "snapshot_id", "INTEGER")
+        _ensure_column(conn, "score_breakdowns", "score_value", "REAL")
+        _ensure_column(conn, "score_breakdowns", "explanation", "TEXT")
+        _ensure_column(conn, "score_breakdowns", "confidence_score", "REAL")
+        _ensure_column(conn, "score_breakdowns", "weights_profile_id", "INTEGER")
+        _ensure_column(conn, "score_breakdowns", "weights_version", "TEXT")
         conn.commit()
 
         # Only seed if tables are empty
@@ -220,6 +409,18 @@ def init_db(db_path: str = DB_PATH) -> None:
             conn.commit()
     finally:
         conn.close()
+
+
+def _ensure_column(
+    conn: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    column_sql: str,
+) -> None:
+    columns = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    existing = {c["name"] for c in columns}
+    if column_name not in existing:
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
 
 
 def _seed_professors(conn: sqlite3.Connection) -> None:
@@ -254,6 +455,837 @@ def _seed_sources(conn: sqlite3.Connection) -> None:
                VALUES (?,?,?,?,?)""",
             (s["name"], s["url_pattern"], s["type"], s["active"], s["supports_chinese"]),
         )
+
+
+# ---------------------------------------------------------------------------
+# PRD entities CRUD
+# ---------------------------------------------------------------------------
+
+def _json_blob(data: Optional[dict]) -> str:
+    return json.dumps(data or {}, ensure_ascii=False)
+
+
+def _json_loads(raw: Optional[str]) -> dict:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+SENSITIVE_FIELDS = {"requirements", "deadlines", "tuition", "duration", "faculty"}
+
+
+def create_snapshot(run_metadata: Optional[dict], db_path: str = DB_PATH) -> int:
+    ts = now_iso()
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO scan_snapshots (started_at, run_metadata, summary_json)
+               VALUES (?,?,?)""",
+            (ts, _json_blob(run_metadata), _json_blob({})),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def close_snapshot(snapshot_id: int, db_path: str = DB_PATH) -> None:
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            """UPDATE scan_snapshots
+               SET status='closed', closed_at=?
+               WHERE id=?""",
+            (now_iso(), snapshot_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_snapshot_summary(snapshot_id: int, summary: dict, db_path: str = DB_PATH) -> None:
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            """UPDATE scan_snapshots
+               SET summary_json=?
+               WHERE id=?""",
+            (_json_blob(summary), snapshot_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_scan_snapshot(snapshot_id: int, db_path: str = DB_PATH) -> Optional[dict]:
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            """SELECT id, started_at, closed_at, status, run_metadata, summary_json
+               FROM scan_snapshots
+               WHERE id=?
+               LIMIT 1""",
+            (snapshot_id,),
+        ).fetchone()
+        if not row:
+            return None
+        record = dict(row)
+        record["run_metadata"] = _json_loads(record.get("run_metadata"))
+        record["summary_json"] = _json_loads(record.get("summary_json"))
+        return record
+    finally:
+        conn.close()
+
+
+def upsert_score_breakdown(
+    *,
+    entity_type: str,
+    entity_id: int,
+    score_name: str,
+    snapshot_id: Optional[int],
+    score_value: float,
+    components: Optional[dict],
+    explanation: str,
+    confidence_score: Optional[float],
+    weights_profile_id: Optional[int] = None,
+    weights_version: Optional[str] = None,
+    db_path: str = DB_PATH,
+) -> int:
+    """
+    Idempotent write helper for score_breakdowns.
+    Uniqueness key (logical): entity_type, entity_id, score_name, snapshot_id.
+    """
+    ts = now_iso()
+    conn = get_connection(db_path)
+    try:
+        existing = conn.execute(
+            """SELECT id FROM score_breakdowns
+               WHERE entity_type=? AND entity_id=? AND score_name=?
+                 AND ((snapshot_id IS NULL AND ? IS NULL) OR snapshot_id=?)
+               ORDER BY id DESC
+               LIMIT 1""",
+            (entity_type, entity_id, score_name, snapshot_id, snapshot_id),
+        ).fetchone()
+
+        payload = (
+            snapshot_id,
+            score_value,
+            score_value,  # backward-compatible column read by existing views
+            _json_blob(components),
+            explanation,
+            confidence_score,
+            weights_profile_id,
+            weights_version,
+            ts,
+        )
+        if existing:
+            conn.execute(
+                """UPDATE score_breakdowns
+                   SET snapshot_id=?, score_value=?, total_score=?, components=?,
+                       explanation=?, confidence_score=?, weights_profile_id=?,
+                       weights_version=?, computed_at=?
+                   WHERE id=?""",
+                (*payload, existing["id"]),
+            )
+            conn.commit()
+            return existing["id"]
+
+        cur = conn.execute(
+            """INSERT INTO score_breakdowns
+               (entity_type, entity_id, score_name, snapshot_id, score_value, total_score,
+                components, explanation, confidence_score, weights_profile_id,
+                weights_version, computed_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                entity_type,
+                entity_id,
+                score_name,
+                *payload,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# User profiles CRUD
+# ---------------------------------------------------------------------------
+
+def list_user_profiles(db_path: str = DB_PATH) -> list[dict]:
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM user_profiles
+            ORDER BY
+                CASE WHEN json_extract(derived_data, '$.is_active') = 1 THEN 0 ELSE 1 END,
+                updated_at DESC,
+                id DESC
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_user_profile(profile_id: int, db_path: str = DB_PATH) -> Optional[dict]:
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM user_profiles WHERE id=? LIMIT 1",
+            (profile_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_active_user_profile(db_path: str = DB_PATH) -> Optional[dict]:
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM user_profiles
+            WHERE json_extract(derived_data, '$.is_active') = 1
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if row:
+            return dict(row)
+    finally:
+        conn.close()
+
+    profiles = list_user_profiles(db_path)
+    if profiles:
+        set_active_user_profile(profiles[0]["id"], db_path)
+        return get_user_profile(profiles[0]["id"], db_path)
+    return None
+
+
+def add_user_profile(data: dict, db_path: str = DB_PATH) -> int:
+    ts = now_iso()
+    user_key = str(data.get("user_key") or "").strip()
+    if not user_key:
+        raise ValueError("user_key is required")
+
+    derived_data = _json_loads(data.get("derived_data"))
+    incoming_weights = data.get("weights")
+    if isinstance(incoming_weights, dict):
+        derived_data["weights"] = incoming_weights
+    if "weights_version" in data:
+        derived_data["weights_version"] = str(data["weights_version"])
+    is_active = bool(data.get("is_active", False))
+    derived_data["is_active"] = 1 if is_active else 0
+
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            """
+            INSERT INTO user_profiles
+                (user_key, display_name, email, role, official_data, derived_data,
+                 inferred_data, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                user_key,
+                data.get("display_name"),
+                data.get("email"),
+                data.get("role"),
+                _json_blob(data.get("official_data")),
+                _json_blob(derived_data),
+                _json_blob(data.get("inferred_data")),
+                ts,
+                ts,
+            ),
+        )
+        new_id = cur.lastrowid
+        if is_active:
+            _deactivate_other_profiles(conn, new_id, ts)
+        conn.commit()
+        return new_id
+    finally:
+        conn.close()
+
+
+def _deactivate_other_profiles(conn: sqlite3.Connection, active_profile_id: int, ts: str) -> None:
+    rows = conn.execute(
+        "SELECT id, derived_data FROM user_profiles WHERE id <> ?",
+        (active_profile_id,),
+    ).fetchall()
+    for row in rows:
+        derived = _json_loads(row["derived_data"])
+        if int(derived.get("is_active", 0)) != 1:
+            continue
+        derived["is_active"] = 0
+        conn.execute(
+            "UPDATE user_profiles SET derived_data=?, updated_at=? WHERE id=?",
+            (_json_blob(derived), ts, row["id"]),
+        )
+
+
+def update_user_profile(profile_id: int, data: dict, db_path: str = DB_PATH) -> None:
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM user_profiles WHERE id=? LIMIT 1",
+            (profile_id,),
+        ).fetchone()
+        if not row:
+            return
+
+        current = dict(row)
+        derived_data = _json_loads(current.get("derived_data"))
+
+        if isinstance(data.get("weights"), dict):
+            derived_data["weights"] = data["weights"]
+        if "weights_version" in data:
+            derived_data["weights_version"] = str(data["weights_version"])
+        if "is_active" in data:
+            derived_data["is_active"] = 1 if data["is_active"] else 0
+
+        fields = {
+            "user_key": data["user_key"] if "user_key" in data else current.get("user_key"),
+            "display_name": data["display_name"] if "display_name" in data else current.get("display_name"),
+            "email": data["email"] if "email" in data else current.get("email"),
+            "role": data["role"] if "role" in data else current.get("role"),
+            "official_data": _json_blob(
+                data["official_data"] if "official_data" in data else _json_loads(current.get("official_data"))
+            ),
+            "derived_data": _json_blob(derived_data),
+            "inferred_data": _json_blob(
+                data["inferred_data"] if "inferred_data" in data else _json_loads(current.get("inferred_data"))
+            ),
+            "updated_at": now_iso(),
+        }
+        conn.execute(
+            """
+            UPDATE user_profiles
+            SET user_key=?, display_name=?, email=?, role=?, official_data=?,
+                derived_data=?, inferred_data=?, updated_at=?
+            WHERE id=?
+            """,
+            (
+                fields["user_key"],
+                fields["display_name"],
+                fields["email"],
+                fields["role"],
+                fields["official_data"],
+                fields["derived_data"],
+                fields["inferred_data"],
+                fields["updated_at"],
+                profile_id,
+            ),
+        )
+        if derived_data.get("is_active") == 1:
+            _deactivate_other_profiles(conn, profile_id, fields["updated_at"])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_active_user_profile(profile_id: int, db_path: str = DB_PATH) -> None:
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute("SELECT id, derived_data FROM user_profiles").fetchall()
+        ts = now_iso()
+        for row in rows:
+            derived = _json_loads(row["derived_data"])
+            derived["is_active"] = 1 if row["id"] == profile_id else 0
+            conn.execute(
+                "UPDATE user_profiles SET derived_data=?, updated_at=? WHERE id=?",
+                (_json_blob(derived), ts, row["id"]),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_user_profile(profile_id: int, db_path: str = DB_PATH) -> None:
+    conn = get_connection(db_path)
+    try:
+        conn.execute("DELETE FROM user_profiles WHERE id=?", (profile_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _latest_snapshot_entities(conn: sqlite3.Connection, snapshot_id: int) -> dict[tuple[str, int], dict]:
+    rows = conn.execute(
+        """SELECT entity_type, entity_id, payload, change_type, inconsistency_flag
+           FROM snapshot_entities
+           WHERE snapshot_id=?
+           ORDER BY id DESC""",
+        (snapshot_id,),
+    ).fetchall()
+    latest: dict[tuple[str, int], dict] = {}
+    for row in rows:
+        key = (row["entity_type"], row["entity_id"])
+        if key in latest:
+            continue
+        latest[key] = {
+            "payload": _json_loads(row["payload"]),
+            "change_type": row["change_type"],
+            "inconsistency_flag": bool(row["inconsistency_flag"]),
+        }
+    return latest
+
+
+def diff_snapshot(previous_snapshot_id: int, current_snapshot_id: int, db_path: str = DB_PATH) -> dict:
+    conn = get_connection(db_path)
+    try:
+        previous = _latest_snapshot_entities(conn, previous_snapshot_id)
+        current = _latest_snapshot_entities(conn, current_snapshot_id)
+    finally:
+        conn.close()
+
+    all_keys = set(previous.keys()) | set(current.keys())
+    by_entity: dict[str, dict] = {}
+    detailed_changes: list[dict] = []
+    for entity_type, entity_id in sorted(all_keys):
+        prev = previous.get((entity_type, entity_id))
+        curr = current.get((entity_type, entity_id))
+        if entity_type not in by_entity:
+            by_entity[entity_type] = {"added": 0, "removed": 0, "modified": 0}
+        if prev is None and curr is not None:
+            by_entity[entity_type]["added"] += 1
+            detailed_changes.append({"entity_type": entity_type, "entity_id": entity_id, "change": "added"})
+        elif prev is not None and curr is None:
+            by_entity[entity_type]["removed"] += 1
+            detailed_changes.append({"entity_type": entity_type, "entity_id": entity_id, "change": "removed"})
+        elif prev and curr and prev["payload"] != curr["payload"]:
+            by_entity[entity_type]["modified"] += 1
+            detailed_changes.append({"entity_type": entity_type, "entity_id": entity_id, "change": "modified"})
+
+    totals = {"added": 0, "removed": 0, "modified": 0}
+    for counters in by_entity.values():
+        for key in totals:
+            totals[key] += counters[key]
+
+    return {"totals": totals, "by_entity": by_entity, "changes": detailed_changes}
+
+
+def tag_snapshot_entity(
+    snapshot_id: int,
+    entity_type: str,
+    entity_id: int,
+    payload: dict,
+    change_type: str,
+    inconsistency_flag: bool = False,
+    db_path: str = DB_PATH,
+) -> int:
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO snapshot_entities
+               (snapshot_id, entity_type, entity_id, payload, change_type, inconsistency_flag, created_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (
+                snapshot_id,
+                entity_type,
+                entity_id,
+                _json_blob(payload),
+                change_type,
+                1 if inconsistency_flag else 0,
+                now_iso(),
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def add_audit_record(
+    entity_type: str,
+    entity_id: int,
+    change_type: str,
+    details: dict,
+    db_path: str = DB_PATH,
+) -> int:
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO audit_records
+               (entity_type, entity_id, change_type, detected_at, details)
+               VALUES (?,?,?,?,?)""",
+            (entity_type, entity_id, change_type, now_iso(), _json_blob(details)),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_change_summary_for_ui(
+    snapshot_id: int,
+    previous_snapshot_id: Optional[int] = None,
+    db_path: str = DB_PATH,
+) -> dict:
+    if previous_snapshot_id is None:
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                """SELECT id FROM scan_snapshots
+                   WHERE id < ?
+                   ORDER BY id DESC
+                   LIMIT 1""",
+                (snapshot_id,),
+            ).fetchone()
+            previous_snapshot_id = row["id"] if row else None
+        finally:
+            conn.close()
+    if previous_snapshot_id is None:
+        return {
+            "snapshot_id": snapshot_id,
+            "previous_snapshot_id": None,
+            "totals": {"added": 0, "removed": 0, "modified": 0},
+            "by_entity": {},
+            "changes": [],
+        }
+    diff = diff_snapshot(previous_snapshot_id, snapshot_id, db_path)
+    return {
+        "snapshot_id": snapshot_id,
+        "previous_snapshot_id": previous_snapshot_id,
+        **diff,
+    }
+
+
+def add_university(data: dict, db_path: str = DB_PATH) -> int:
+    ts = now_iso()
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO universities
+               (name, slug, country, city, website,
+                official_data, derived_data, inferred_data,
+                created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                data["name"],
+                data.get("slug"),
+                data.get("country"),
+                data.get("city"),
+                data.get("website"),
+                _json_blob(data.get("official_data")),
+                _json_blob(data.get("derived_data")),
+                _json_blob(data.get("inferred_data")),
+                ts,
+                ts,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_universities(db_path: str = DB_PATH) -> list[dict]:
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute("SELECT * FROM universities ORDER BY name").fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def add_program(data: dict, db_path: str = DB_PATH) -> int:
+    ts = now_iso()
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO programs
+               (university_id, school_id, name, degree_level, delivery_mode, status,
+                official_data, derived_data, inferred_data, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                data["university_id"],
+                data.get("school_id"),
+                data["name"],
+                data.get("degree_level"),
+                data.get("delivery_mode"),
+                data.get("status"),
+                _json_blob(data.get("official_data")),
+                _json_blob(data.get("derived_data")),
+                _json_blob(data.get("inferred_data")),
+                ts,
+                ts,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def _get_program_by_key(
+    conn: sqlite3.Connection,
+    university_id: int,
+    school_id: Optional[int],
+    name: str,
+) -> Optional[sqlite3.Row]:
+    if school_id is None:
+        return conn.execute(
+            """SELECT * FROM programs
+               WHERE university_id=? AND school_id IS NULL AND name=?
+               LIMIT 1""",
+            (university_id, name),
+        ).fetchone()
+    return conn.execute(
+        """SELECT * FROM programs
+           WHERE university_id=? AND school_id=? AND name=?
+           LIMIT 1""",
+        (university_id, school_id, name),
+    ).fetchone()
+
+
+def upsert_program_with_audit(
+    data: dict,
+    snapshot_id: Optional[int] = None,
+    db_path: str = DB_PATH,
+) -> tuple[int, str, bool]:
+    """
+    Upsert program records and detect sensitive changes/source inconsistencies.
+    Returns: (program_id, change_type, inconsistency_flag)
+    """
+    ts = now_iso()
+    incoming_official = copy.deepcopy(data.get("official_data") or {})
+    incoming_derived = copy.deepcopy(data.get("derived_data") or {})
+    source_url = (incoming_derived.get("source_url") or "").strip()
+    conn = get_connection(db_path)
+    try:
+        row = _get_program_by_key(conn, data["university_id"], data.get("school_id"), data["name"])
+        inconsistency_flag = False
+
+        if row is None:
+            source_values: dict[str, dict] = {}
+            for field in SENSITIVE_FIELDS:
+                field_values: dict[str, str] = {}
+                value = incoming_official.get(field)
+                if source_url and value not in (None, ""):
+                    field_values[source_url] = value
+                source_values[field] = field_values
+            incoming_derived["source_values"] = source_values
+            if source_url:
+                incoming_derived["last_source_url"] = source_url
+            cur = conn.execute(
+                """INSERT INTO programs
+                   (university_id, school_id, name, degree_level, delivery_mode, status,
+                    official_data, derived_data, inferred_data, created_at, updated_at, inconsistency_flag)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    data["university_id"],
+                    data.get("school_id"),
+                    data["name"],
+                    data.get("degree_level"),
+                    data.get("delivery_mode"),
+                    data.get("status"),
+                    _json_blob(incoming_official),
+                    _json_blob(incoming_derived),
+                    _json_blob(data.get("inferred_data")),
+                    ts,
+                    ts,
+                    0,
+                ),
+            )
+            program_id = cur.lastrowid
+            change_type = "new"
+        else:
+            program_id = row["id"]
+            old_official = _json_loads(row["official_data"])
+            old_derived = _json_loads(row["derived_data"])
+
+            field_changes: dict[str, dict] = {}
+            for field in SENSITIVE_FIELDS:
+                old_val = (old_official.get(field) or "").strip() if isinstance(old_official.get(field), str) else old_official.get(field)
+                new_val = (incoming_official.get(field) or "").strip() if isinstance(incoming_official.get(field), str) else incoming_official.get(field)
+                if old_val != new_val:
+                    field_changes[field] = {"before": old_val, "after": new_val}
+
+            known_values = old_derived.get("source_values", {})
+            source_values = known_values if isinstance(known_values, dict) else {}
+            for field in SENSITIVE_FIELDS:
+                existing = source_values.get(field, {})
+                if not isinstance(existing, dict):
+                    existing = {}
+                if source_url and field in incoming_official and incoming_official.get(field) not in (None, ""):
+                    existing[source_url] = incoming_official[field]
+                source_values[field] = existing
+                distinct_values = {str(v).strip() for v in existing.values() if str(v).strip()}
+                if len(distinct_values) > 1:
+                    inconsistency_flag = True
+
+            merged_derived = old_derived
+            merged_derived.update(incoming_derived)
+            merged_derived["source_values"] = source_values
+            merged_derived["last_source_url"] = source_url or old_derived.get("last_source_url")
+
+            conn.execute(
+                """UPDATE programs
+                   SET degree_level=?, delivery_mode=?, status=?,
+                       official_data=?, derived_data=?, inferred_data=?,
+                       updated_at=?, inconsistency_flag=?
+                   WHERE id=?""",
+                (
+                    data.get("degree_level"),
+                    data.get("delivery_mode"),
+                    data.get("status"),
+                    _json_blob(incoming_official),
+                    _json_blob(merged_derived),
+                    _json_blob(data.get("inferred_data")),
+                    ts,
+                    1 if inconsistency_flag else int(row["inconsistency_flag"] or 0),
+                    program_id,
+                ),
+            )
+            change_type = "updated" if field_changes else "unchanged"
+            if field_changes:
+                conn.execute(
+                    """INSERT INTO audit_records
+                       (entity_type, entity_id, change_type, detected_at, details)
+                       VALUES (?,?,?,?,?)""",
+                    (
+                        "program",
+                        program_id,
+                        "sensitive_fields_changed",
+                        ts,
+                        _json_blob({"fields": field_changes, "source_url": source_url}),
+                    ),
+                )
+            if inconsistency_flag:
+                conn.execute(
+                    """INSERT INTO audit_records
+                       (entity_type, entity_id, change_type, detected_at, details)
+                       VALUES (?,?,?,?,?)""",
+                    (
+                        "program",
+                        program_id,
+                        "source_inconsistency",
+                        ts,
+                        _json_blob({"sensitive_fields": sorted(SENSITIVE_FIELDS), "source_url": source_url}),
+                    ),
+                )
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    if snapshot_id:
+        tag_snapshot_entity(
+            snapshot_id=snapshot_id,
+            entity_type="program",
+            entity_id=program_id,
+            payload={
+                "name": data.get("name"),
+                "university_id": data.get("university_id"),
+                "official_data": incoming_official,
+            },
+            change_type=change_type,
+            inconsistency_flag=inconsistency_flag,
+            db_path=db_path,
+        )
+    return program_id, change_type, inconsistency_flag
+
+
+def get_programs(db_path: str = DB_PATH, university_id: Optional[int] = None) -> list[dict]:
+    conn = get_connection(db_path)
+    try:
+        if university_id is None:
+            rows = conn.execute("SELECT * FROM programs ORDER BY name").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM programs WHERE university_id=? ORDER BY name",
+                (university_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def add_faculty(data: dict, db_path: str = DB_PATH) -> int:
+    ts = now_iso()
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO faculty
+               (university_id, school_id, name, title, email, profile_url,
+                official_data, derived_data, inferred_data, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                data["university_id"],
+                data.get("school_id"),
+                data["name"],
+                data.get("title"),
+                data.get("email"),
+                data.get("profile_url"),
+                _json_blob(data.get("official_data")),
+                _json_blob(data.get("derived_data")),
+                _json_blob(data.get("inferred_data")),
+                ts,
+                ts,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_faculty(db_path: str = DB_PATH, university_id: Optional[int] = None) -> list[dict]:
+    conn = get_connection(db_path)
+    try:
+        if university_id is None:
+            rows = conn.execute("SELECT * FROM faculty ORDER BY name").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM faculty WHERE university_id=? ORDER BY name",
+                (university_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def add_snapshot(data: dict, db_path: str = DB_PATH) -> int:
+    ts = data.get("created_at") or now_iso()
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO snapshots (entity_type, entity_id, payload, created_at)
+               VALUES (?,?,?,?)""",
+            (
+                data["entity_type"],
+                data["entity_id"],
+                _json_blob(data.get("payload")),
+                ts,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_snapshots(entity_type: str, entity_id: int, db_path: str = DB_PATH) -> list[dict]:
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT * FROM snapshots
+               WHERE entity_type=? AND entity_id=?
+               ORDER BY created_at DESC""",
+            (entity_type, entity_id),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -634,6 +1666,75 @@ def get_scan_history(db_path: str = DB_PATH, limit: int = 20) -> list[dict]:
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+
+def get_operational_metrics(db_path: str = DB_PATH, limit: int = 8) -> dict:
+    """
+    Returns latest snapshot operational metrics and week-vs-week comparison.
+    """
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, started_at, closed_at, summary_json
+            FROM scan_snapshots
+            WHERE status='closed'
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        snapshots = [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+    for item in snapshots:
+        item["summary"] = _json_loads(item.get("summary_json"))
+
+    latest = snapshots[0] if snapshots else None
+    week_ago = snapshots[1] if len(snapshots) > 1 else None
+    if latest and latest.get("closed_at"):
+        try:
+            latest_dt = datetime.strptime(latest["closed_at"], "%Y-%m-%d %H:%M:%S")
+            target = latest_dt.timestamp() - 7 * 24 * 3600
+            for candidate in snapshots[1:]:
+                closed_at = candidate.get("closed_at")
+                if not closed_at:
+                    continue
+                candidate_dt = datetime.strptime(closed_at, "%Y-%m-%d %H:%M:%S")
+                if candidate_dt.timestamp() <= target:
+                    week_ago = candidate
+                    break
+        except ValueError:
+            pass
+
+    def _metric(snapshot: Optional[dict], key_path: tuple[str, ...], default: float = 0.0) -> float:
+        if not snapshot:
+            return default
+        payload = snapshot.get("summary") or {}
+        node: object = payload
+        for k in key_path:
+            if not isinstance(node, dict):
+                return default
+            node = node.get(k)
+        try:
+            return float(node)
+        except (TypeError, ValueError):
+            return default
+
+    comparison = {
+        "coverage_delta": _metric(latest, ("metrics", "coverage", "ratio")) - _metric(week_ago, ("metrics", "coverage", "ratio")),
+        "freshness_delta": _metric(latest, ("metrics", "freshness", "ratio")) - _metric(week_ago, ("metrics", "freshness", "ratio")),
+        "inconsistency_delta": _metric(latest, ("metrics", "inconsistencies", "count")) - _metric(week_ago, ("metrics", "inconsistencies", "count")),
+        "critical_nulls_delta": _metric(latest, ("metrics", "critical_nulls", "count")) - _metric(week_ago, ("metrics", "critical_nulls", "count")),
+    }
+
+    return {
+        "latest": latest,
+        "week_ago": week_ago,
+        "comparison": comparison,
+        "history": snapshots,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -13,14 +13,16 @@ Each scraper function yields dicts compatible with database.add_finding().
 All errors are caught and logged; a single source failure never crashes the run.
 """
 
-import time
 import logging
 import re
 import json
 import traceback
+import hashlib
+import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Generator, Optional
-from urllib.parse import quote_plus, urlencode
+from typing import Any, Callable, Generator, Optional
+from urllib.parse import quote_plus, urlencode, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -28,6 +30,8 @@ import feedparser
 import arxiv
 
 import os
+from scoring import score_snapshot
+from normalization import normalize_program_payload
 
 from config import (
     BROWSER_HEADERS,
@@ -36,9 +40,28 @@ from config import (
     SCHOLAR_MAX_RESULTS,
     DAYS_LOOKBACK,
     SCRAPER_DELAY_SECONDS,
+    UNIVERSITY_SOURCE_SEEDS,
 )
 
 log = logging.getLogger(__name__)
+
+SEED_PRIORITY_ORDER = [
+    "SUSTech",
+    "Harbin Institute of Technology, Shenzhen",
+]
+
+CONNECTOR_VERSION = "2026.04.16"
+
+CRITICAL_FIELD_KEYS = [
+    "language",
+    "duration",
+    "tuition",
+    "requirements",
+    "deadlines",
+    "portal",
+    "supervisor_required",
+    "interview_required",
+]
 
 # Disable scholarly on cloud environments where Google blocks server IPs.
 # Set ENABLE_SCHOLARLY=1 to force-enable (e.g. when running locally with a VPN).
@@ -65,6 +88,642 @@ def _get(url: str, headers: Optional[dict] = None, timeout: int = 15) -> Optiona
 
 def _cutoff_date() -> datetime:
     return datetime.now(timezone.utc) - timedelta(days=DAYS_LOOKBACK)
+
+
+def _normalize_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _content_hash(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def _prioritize_seed_universities(seed_list: list[dict]) -> list[dict]:
+    """
+    Ensure Shenzhen critical seeds are processed first for minimum stable coverage.
+    """
+    if not seed_list:
+        return []
+
+    def score(seed: dict) -> tuple[int, int]:
+        name = seed.get("name", "")
+        try:
+            idx = SEED_PRIORITY_ORDER.index(name)
+            return (0, idx)
+        except ValueError:
+            return (1, len(SEED_PRIORITY_ORDER))
+
+    return sorted(seed_list, key=score)
+
+
+def _normalize_table_rows(soup: BeautifulSoup) -> list[dict[str, str]]:
+    """
+    Normalize HTML tables into row dictionaries to support connector-specific parsing.
+    """
+    tables: list[dict[str, str]] = []
+    for table in soup.select("table"):
+        headers = [_normalize_whitespace(th.get_text(" ", strip=True)) for th in table.select("tr th")]
+        if not headers:
+            continue
+        for row in table.select("tr"):
+            cells = [_normalize_whitespace(td.get_text(" ", strip=True)) for td in row.select("td")]
+            if not cells or len(cells) != len(headers):
+                continue
+            tables.append(dict(zip(headers, cells)))
+    return tables
+
+
+def _extract_program_title(page_text: str, source_url: str) -> str:
+    title_match = re.search(
+        r"(Master(?:'s)?\s+Program[^.]{0,120}|Graduate Program[^.]{0,120}|硕士[^。]{0,120})",
+        page_text,
+        flags=re.IGNORECASE,
+    )
+    return _normalize_whitespace(title_match.group(0)) if title_match else f"Program from {urlparse(source_url).netloc}"
+
+
+def _build_program_contract(
+    source_url: str,
+    program_name: str,
+    critical_fields: dict[str, Optional[str]],
+    evidence: dict[str, dict[str, str]],
+) -> list[dict]:
+    normalized_fields: dict[str, Optional[str]] = {k: critical_fields.get(k) for k in CRITICAL_FIELD_KEYS}
+    normalized_fields["supervisor_required"] = normalized_fields.get("supervisor_required") or "no"
+    normalized_fields["interview_required"] = normalized_fields.get("interview_required") or "no"
+
+    evidence_by_field: dict[str, dict[str, str]] = {}
+    for field in CRITICAL_FIELD_KEYS:
+        if field in evidence:
+            evidence_by_field[field] = evidence[field]
+            continue
+        evidence_by_field[field] = {
+            "snippet": "not_found",
+            "url": source_url,
+            "locator": "not_found",
+        }
+
+    if not any(normalized_fields.get(k) for k in CRITICAL_FIELD_KEYS if k not in ("supervisor_required", "interview_required")):
+        return []
+
+    return [
+        {
+            "name": program_name[:200],
+            "degree_level": "master",
+            "delivery_mode": None,
+            "status": "active",
+            "critical_fields": normalized_fields,
+            "evidence_by_field": evidence_by_field,
+            "source_url": source_url,
+            "connector_contract_version": CONNECTOR_VERSION,
+        }
+    ]
+
+
+def _match_field_spec(
+    normalized_text: str,
+    source_url: str,
+    patterns: list[str],
+    *,
+    value_group: int = 0,
+    truthy_flag: bool = False,
+    locator: str = "regex_match",
+) -> tuple[Optional[str], Optional[dict[str, str]]]:
+    for pattern in patterns:
+        match = re.search(pattern, normalized_text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        snippet = _normalize_whitespace(match.group(0))
+        value = "yes" if truthy_flag else _normalize_whitespace(match.group(value_group))
+        return value, {"snippet": snippet, "url": source_url, "locator": locator}
+    return None, None
+
+
+def _extract_critical_fields_from_text(page_text: str, source_url: str) -> tuple[dict[str, Optional[str]], dict[str, dict[str, str]]]:
+    normalized = _normalize_whitespace(page_text)
+    field_specs: dict[str, dict[str, Any]] = {
+        "language": {
+            "patterns": [
+                r"(?:language of instruction|teaching language|语言)\s*[:：-]?\s*(english|chinese|bilingual)",
+            ],
+            "value_group": 1,
+        },
+        "duration": {
+            "patterns": [
+                r"(?:duration|length of study|学制)\s*[:：-]?\s*(\d+\s*(?:years|year|semesters|semester|months|month|年))",
+            ],
+            "value_group": 1,
+        },
+        "tuition": {
+            "patterns": [
+                r"(?:tuition|fee|学费)[^.;]{0,100}?((?:rmb|cny|usd|\$|¥)\s?\d[\d,\.]*(?:\s*(?:per\s*year|/year|annual|元))?)",
+                r"((?:rmb|cny|usd|\$|¥)\s?\d[\d,\.]*(?:\s*(?:per\s*year|/year|annual|元))?)\s*(?:tuition|fee|学费)",
+            ],
+            "value_group": 1,
+        },
+        "requirements": {
+            "patterns": [
+                r"(?:requirements?|eligibility|admission criteria|申请条件)\s*[:：]?\s*([^.;]{10,220})",
+            ],
+            "value_group": 1,
+        },
+        "deadlines": {
+            "patterns": [
+                r"(?:deadline|application due|截止日期)\s*[:：]?\s*((?:\d{4}[/-]\d{1,2}[/-]\d{1,2})|(?:\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})|(?:[A-Za-z]{3,9}\s+\d{1,2},\s*\d{4})|(?:rolling basis)|(?:[^.;]{3,80}))",
+            ],
+            "value_group": 1,
+        },
+        "portal": {
+            "patterns": [
+                r"(?:apply|application portal|online application|申请系统)[^h]{0,40}(https?://[^\s)]+)",
+            ],
+            "value_group": 1,
+        },
+        "supervisor_required": {
+            "patterns": [
+                r"(?:supervisor|advisor|导师).{0,80}(?:required|must|必要|需要)",
+            ],
+            "truthy_flag": True,
+        },
+        "interview_required": {
+            "patterns": [
+                r"(?:interview|面试).{0,80}(?:required|must|必要|需要)",
+            ],
+            "truthy_flag": True,
+        },
+    }
+    extracted: dict[str, Optional[str]] = {}
+    evidences: dict[str, dict[str, str]] = {}
+    for field, spec in field_specs.items():
+        value, evidence = _match_field_spec(
+            normalized,
+            source_url,
+            spec["patterns"],
+            value_group=spec.get("value_group", 0),
+            truthy_flag=spec.get("truthy_flag", False),
+        )
+        if value:
+            extracted[field] = value
+        if evidence:
+            evidences[field] = evidence
+    return extracted, evidences
+
+
+def _extract_with_regex(page_text: str, source_url: str) -> list[dict]:
+    normalized = _normalize_whitespace(page_text)
+    extracted, evidences = _extract_critical_fields_from_text(normalized, source_url)
+
+    return _build_program_contract(
+        source_url=source_url,
+        program_name=_extract_program_title(normalized, source_url),
+        critical_fields=extracted,
+        evidence=evidences,
+    )
+
+
+def _extract_with_table_fallback(page_text: str, source_url: str, table_rows: list[dict[str, str]]) -> list[dict]:
+    extracted: dict[str, Optional[str]] = {}
+    evidences: dict[str, dict[str, str]] = {}
+    key_aliases = {
+        "language": ("language", "teaching language", "语言"),
+        "duration": ("duration", "length of study", "学制"),
+        "tuition": ("tuition", "fee", "学费"),
+        "requirements": ("requirements", "eligibility", "申请条件"),
+        "deadlines": ("deadline", "application due", "截止日期"),
+        "portal": ("application portal", "online application", "apply", "申请系统"),
+    }
+
+    for row in table_rows:
+        for header, value in row.items():
+            header_lower = header.lower()
+            for field_name, aliases in key_aliases.items():
+                if extracted.get(field_name):
+                    continue
+                if any(alias.lower() in header_lower for alias in aliases):
+                    extracted[field_name] = value
+                    evidences[field_name] = {
+                        "snippet": f"{header}: {value}",
+                        "url": source_url,
+                        "locator": "table_header_match",
+                    }
+
+    return _build_program_contract(
+        source_url=source_url,
+        program_name=_extract_program_title(page_text, source_url),
+        critical_fields=extracted,
+        evidence=evidences,
+    )
+
+
+CONNECTOR_REGISTRY: dict[str, dict[str, Any]] = {
+    "SUSTech": {
+        "selectors": ["main", "article", ".content", ".article-content"],
+        "fallback_selectors": ["body"],
+        "normalizers": ["regex", "table"],
+    },
+    "Harbin Institute of Technology, Shenzhen": {
+        "selectors": ["main", "#content", ".main-content", ".wp_articlecontent"],
+        "fallback_selectors": ["body"],
+        "normalizers": ["regex", "table"],
+    },
+}
+
+
+DOMAIN_RETRY_POLICY = {
+    "www.sustech.edu.cn": {"attempts": 3, "backoff_factor": 1.3},
+    "www.hitsz.edu.cn": {"attempts": 4, "backoff_factor": 1.6},
+}
+
+
+def _fetch_page_with_retry(url: str, timeout: int = 20) -> Optional[dict[str, Any]]:
+    domain = urlparse(url).netloc
+    policy = DOMAIN_RETRY_POLICY.get(domain, {"attempts": 2, "backoff_factor": 1.5})
+    attempts = policy["attempts"]
+    backoff_factor = policy["backoff_factor"]
+    delay = 0.5
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = requests.get(url, headers=BROWSER_HEADERS, timeout=timeout, allow_redirects=True)
+            status_code = resp.status_code
+            redirects = [h.url for h in resp.history] if resp.history else []
+            if status_code >= 500:
+                raise requests.HTTPError(f"status={status_code}")
+            page_text = _normalize_whitespace(BeautifulSoup(resp.text, "html.parser").get_text(" ", strip=True))
+            return {
+                "response": resp,
+                "status_code": status_code,
+                "redirect_chain": redirects,
+                "empty_page": not bool(page_text),
+                "attempts_used": attempt,
+                "domain_policy": policy,
+            }
+        except Exception as exc:
+            last_error = str(exc)
+            if attempt >= attempts:
+                break
+            time.sleep(delay)
+            delay *= backoff_factor
+
+    log.warning("Failed to fetch %s after %s attempts: %s", url, attempts, last_error)
+    return None
+
+
+def _extract_programs_with_connector(university_name: str, soup: BeautifulSoup, source_url: str) -> tuple[list[dict], dict[str, Any]]:
+    connector = CONNECTOR_REGISTRY.get(
+        university_name,
+        {
+            "selectors": ["main", "article", "body"],
+            "fallback_selectors": ["body"],
+            "normalizers": ["regex"],
+        },
+    )
+
+    parser_used = "html.parser"
+    selectors_used = []
+    selected_chunks = []
+    for selector in connector["selectors"]:
+        selected = soup.select(selector)
+        if selected:
+            selectors_used.append(selector)
+            selected_chunks.extend(item.get_text(" ", strip=True) for item in selected)
+            break
+    if not selected_chunks:
+        for selector in connector["fallback_selectors"]:
+            selected = soup.select(selector)
+            if selected:
+                selectors_used.append(selector)
+                selected_chunks.extend(item.get_text(" ", strip=True) for item in selected)
+                break
+    normalized_text = _normalize_whitespace(" ".join(selected_chunks))
+    table_rows = _normalize_table_rows(soup)
+
+    extracted: list[dict] = []
+    normalizer_map: dict[str, Callable[..., list[dict]]] = {
+        "regex": lambda text, url, rows: _extract_with_regex(text, url),
+        "table": lambda text, url, rows: _extract_with_table_fallback(text, url, rows),
+    }
+    normalizer_used = None
+    for normalizer in connector["normalizers"]:
+        fn = normalizer_map.get(normalizer)
+        if not fn:
+            continue
+        extracted = fn(normalized_text, source_url, table_rows)
+        normalizer_used = normalizer
+        if extracted:
+            break
+
+    metadata = {
+        "parser_used": parser_used,
+        "selector_version": CONNECTOR_VERSION,
+        "selectors_used": selectors_used,
+        "normalizer_used": normalizer_used,
+    }
+    return extracted, metadata
+
+
+def _upsert_source_document(
+    conn: sqlite3.Connection,
+    entity_type: str,
+    entity_id: int,
+    source_name: str,
+    source_url: str,
+    content_text: str,
+    source_priority: int,
+    technical_metadata: Optional[dict[str, Any]] = None,
+) -> int:
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    content_hash = _content_hash(content_text)
+    row = conn.execute(
+        """SELECT id FROM source_documents
+           WHERE entity_type=? AND entity_id=? AND source_url=?
+           ORDER BY id DESC LIMIT 1""",
+        (entity_type, entity_id, source_url),
+    ).fetchone()
+    if row:
+        conn.execute(
+            """UPDATE source_documents
+               SET source_name=?, checksum=?, source_priority=?, content_hash=?,
+                   official_data=?, fetched_at=?
+               WHERE id=?""",
+            (
+                source_name,
+                content_hash,
+                source_priority,
+                content_hash,
+                json.dumps({"content_preview": content_text[:500], **(technical_metadata or {})}, ensure_ascii=False),
+                ts,
+                row["id"],
+            ),
+        )
+        return row["id"]
+
+    cur = conn.execute(
+        """INSERT INTO source_documents
+           (entity_type, entity_id, source_name, source_url, checksum,
+            source_priority, content_hash, official_data, fetched_at, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (
+            entity_type,
+            entity_id,
+            source_name,
+            source_url,
+            content_hash,
+            source_priority,
+            content_hash,
+            json.dumps({"content_preview": content_text[:500], **(technical_metadata or {})}, ensure_ascii=False),
+            ts,
+            ts,
+        ),
+    )
+    return cur.lastrowid
+
+
+def _insert_evidence_snippet(
+    conn: sqlite3.Connection,
+    source_document_id: int,
+    entity_type: str,
+    entity_id: int,
+    field_name: str,
+    snippet_text: str,
+    source_url: str,
+    locator: str,
+) -> None:
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        """INSERT INTO evidence_snippets
+           (source_document_id, entity_type, entity_id, snippet_text, locator,
+            confidence_score, official_data, created_at)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (
+            source_document_id,
+            entity_type,
+            entity_id,
+            snippet_text[:1000],
+            json.dumps({"url": source_url, "selector_or_location": locator}, ensure_ascii=False),
+            0.8,
+            json.dumps({"field": field_name}, ensure_ascii=False),
+            ts,
+        ),
+    )
+
+
+def _evidence_rows_for_program(
+    program: dict,
+    source_document_id: int,
+    entity_type: str,
+    entity_id: int,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for field_name, ev in program.get("evidence_by_field", {}).items():
+        rows.append(
+            {
+                "source_document_id": source_document_id,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "field_name": field_name,
+                "snippet_text": ev.get("snippet", "not_found"),
+                "source_url": ev.get("url", program.get("source_url", "")),
+                "locator": ev.get("locator", "not_found"),
+            }
+        )
+    return rows
+
+
+def discover_university_sources(seed_list: Optional[list[dict]] = None) -> list[dict]:
+    """
+    Discover likely admissions/program pages from configured university seeds.
+    """
+    seeds = _prioritize_seed_universities(seed_list or UNIVERSITY_SOURCE_SEEDS)
+    discovered: list[dict] = []
+    keyword_hints = ("admission", "admissions", "graduate", "master", "program", "apply", "international")
+
+    for seed in seeds:
+        name = seed.get("name", "Unknown University")
+        base_urls = seed.get("base_urls", [])
+        links: set[str] = set(base_urls)
+        for base_url in base_urls:
+            resp = _get(base_url)
+            if not resp:
+                continue
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for anchor in soup.select("a[href]"):
+                href = anchor.get("href", "")
+                full_url = urljoin(base_url, href)
+                lower = full_url.lower()
+                if any(k in lower for k in keyword_hints):
+                    if urlparse(full_url).netloc == urlparse(base_url).netloc:
+                        links.add(full_url)
+            _sleep(0.4)
+
+        discovered.append(
+            {
+                "name": name,
+                "base_urls": base_urls,
+                "candidate_urls": sorted(links),
+            }
+        )
+
+    return discovered
+
+
+def extract_programs_from_admission_pages(
+    page_text: str,
+    source_url: str,
+) -> list[dict]:
+    """
+    Extract program-level critical fields from admissions text using the unified connector contract.
+    """
+    return _extract_with_regex(page_text, source_url)
+
+
+def scrape_university_pages(
+    university: dict,
+    db_path: Optional[str] = None,
+    snapshot_id: Optional[int] = None,
+) -> dict:
+    """
+    Scrape university candidate pages, persist source_documents/evidence, and create programs.
+    """
+    import database as db
+
+    if db_path is None:
+        from config import DB_PATH
+        db_path = DB_PATH
+
+    conn = db.get_connection(db_path)
+    created_programs = 0
+    updated_programs = 0
+    unchanged_programs = 0
+    inconsistent_programs = 0
+    processed_urls = 0
+    connector_success = 0
+    connector_fail = 0
+    connector_name = university.get("name", "unknown_connector")
+    errors: list[str] = []
+
+    try:
+        uni_name = university["name"]
+        base_url = (university.get("base_urls") or [None])[0]
+        existing_uni = None
+        for row in db.get_universities(db_path):
+            if row["name"].lower() == uni_name.lower():
+                existing_uni = row
+                break
+        if not existing_uni:
+            uni_id = db.add_university(
+                {"name": uni_name, "slug": re.sub(r"[^a-z0-9]+", "-", uni_name.lower()).strip("-"), "website": base_url},
+                db_path,
+            )
+        else:
+            uni_id = existing_uni["id"]
+
+        for idx, url in enumerate(university.get("candidate_urls", []), start=1):
+            fetch_result = _fetch_page_with_retry(url, timeout=20)
+            if not fetch_result:
+                connector_fail += 1
+                errors.append(f"fetch_failed:{url}")
+                continue
+            resp = fetch_result["response"]
+            soup = BeautifulSoup(resp.text, "html.parser")
+            page_text = _normalize_whitespace(soup.get_text(" ", strip=True))
+            if fetch_result.get("empty_page") or not page_text:
+                log.info("Skipping empty page url=%s status=%s", url, fetch_result.get("status_code"))
+                connector_fail += 1
+                errors.append(f"empty_page:{url}")
+                continue
+
+            processed_urls += 1
+            extracted_programs, connector_metadata = _extract_programs_with_connector(uni_name, soup, url)
+            if extracted_programs:
+                connector_success += 1
+            else:
+                connector_fail += 1
+                errors.append(f"no_programs_extracted:{url}")
+            technical_metadata = {
+                "status_code": fetch_result.get("status_code"),
+                "redirect_chain": fetch_result.get("redirect_chain", []),
+                "attempts_used": fetch_result.get("attempts_used"),
+                "parser_used": connector_metadata.get("parser_used"),
+                "selector_version": connector_metadata.get("selector_version"),
+                "selectors_used": connector_metadata.get("selectors_used", []),
+                "normalizer_used": connector_metadata.get("normalizer_used"),
+            }
+            source_doc_id = _upsert_source_document(
+                conn=conn,
+                entity_type="university",
+                entity_id=uni_id,
+                source_name=uni_name,
+                source_url=url,
+                content_text=page_text,
+                source_priority=max(1, 100 - idx),
+                technical_metadata=technical_metadata,
+            )
+            for program in extracted_programs:
+                normalized_program = normalize_program_payload(program)
+                official_critical = dict(program.get("critical_fields", {}))
+                official_critical["normalization_trace"] = normalized_program["official_data"]
+
+                derived_payload = dict(normalized_program["derived_data"])
+                derived_payload["source_url"] = url
+
+                p_data = {
+                    "university_id": uni_id,
+                    "name": normalized_program.get("canonical_name") or program["name"],
+                    "degree_level": program["degree_level"],
+                    "delivery_mode": program["delivery_mode"],
+                    "status": program["status"],
+                    "official_data": official_critical,
+                    "derived_data": derived_payload,
+                }
+                program_id, change_type, inconsistency_flag = db.upsert_program_with_audit(
+                    p_data,
+                    snapshot_id=snapshot_id,
+                    db_path=db_path,
+                )
+                if change_type == "new":
+                    created_programs += 1
+                elif change_type == "updated":
+                    updated_programs += 1
+                else:
+                    unchanged_programs += 1
+                if inconsistency_flag:
+                    inconsistent_programs += 1
+
+                for evidence_row in _evidence_rows_for_program(
+                    program,
+                    source_document_id=source_doc_id,
+                    entity_type="program",
+                    entity_id=program_id,
+                ):
+                    _insert_evidence_snippet(
+                        conn=conn,
+                        source_document_id=evidence_row["source_document_id"],
+                        entity_type=evidence_row["entity_type"],
+                        entity_id=evidence_row["entity_id"],
+                        field_name=evidence_row["field_name"],
+                        snippet_text=evidence_row["snippet_text"],
+                        source_url=evidence_row["source_url"],
+                        locator=evidence_row["locator"],
+                    )
+            _sleep(0.4)
+
+        conn.commit()
+        return {
+            "university": uni_name,
+            "processed_urls": processed_urls,
+            "programs_created": created_programs,
+            "programs_updated": updated_programs,
+            "programs_unchanged": unchanged_programs,
+            "programs_with_inconsistency": inconsistent_programs,
+            "connector_name": connector_name,
+            "connector_success": connector_success,
+            "connector_fail": connector_fail,
+            "errors": errors,
+        }
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -590,7 +1249,10 @@ def scrape_rss_feed(
 # Main scan entry point
 # ---------------------------------------------------------------------------
 
-def run_full_scan(db_path: str = None) -> dict:
+def run_full_scan(
+    db_path: str = None,
+    run_metadata: Optional[dict] = None,
+) -> dict:
     """
     Execute a complete scan across all active sources and professors.
     Returns a summary dict with counts and error list.
@@ -606,8 +1268,30 @@ def run_full_scan(db_path: str = None) -> dict:
         "keywords_scanned": 0,
         "findings_total": 0,
         "findings_new": 0,
+        "entities_created": 0,
+        "entities_updated": 0,
+        "entities_removed": 0,
+        "entity_changes_by_type": {},
+        "inconsistencies_detected": 0,
+        "programs_scored": 0,
+        "programs_omitted": 0,
+        "score_omitted_cases": [],
         "errors": [],
+        "errors_by_source": {},
+        "university_counters": {},
+        "connector_counters": {},
+        "p0_status": "yellow",
+        "p0_reasons": [],
     }
+    metadata = {
+        "scan_type": "full_scan",
+        "run_kind": "production",
+        "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if run_metadata:
+        metadata.update(run_metadata)
+    snapshot_id = db.create_snapshot(metadata, db_path)
+    summary["snapshot_id"] = snapshot_id
 
     professors = db.get_all_professors(db_path)
     keywords = db.get_all_keywords(db_path)
@@ -616,110 +1300,279 @@ def run_full_scan(db_path: str = None) -> dict:
     active_profs = [p for p in professors if p["status"] in ("active", "watching")]
     active_kws   = [k for k in keywords  if k["active"]]
 
+    source_metrics: dict[str, dict[str, int]] = {}
+    fresh_items = 0
+    stale_items = 0
+    critical_nulls = 0
+
+    def _touch_source(source_key: str) -> dict[str, int]:
+        entry = source_metrics.setdefault(
+            source_key,
+            {"success": 0, "fail": 0, "errors": 0},
+        )
+        return entry
+
+    def _record_source_error(source_key: str, message: str) -> None:
+        src = _touch_source(source_key)
+        src["errors"] += 1
+        summary["errors"].append(message)
+        summary["errors_by_source"][source_key] = src["errors"]
+
+    def _record_uni_counter(university_name: str, *, success: int = 0, fail: int = 0) -> None:
+        name = university_name or "unknown_university"
+        current = summary["university_counters"].setdefault(name, {"success": 0, "fail": 0})
+        current["success"] += success
+        current["fail"] += fail
+
+    def _record_connector_counter(connector_name: str, *, success: int = 0, fail: int = 0) -> None:
+        name = connector_name or "unknown_connector"
+        current = summary["connector_counters"].setdefault(name, {"success": 0, "fail": 0})
+        current["success"] += success
+        current["fail"] += fail
+
     def safe_add(finding: dict) -> bool:
+        nonlocal fresh_items, stale_items
         try:
             result = db.add_finding(finding, db_path)
             summary["findings_total"] += 1
+            published = (finding.get("date_published") or "")[:10]
+            if published:
+                try:
+                    pub_dt = datetime.strptime(published, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                    if pub_dt >= _cutoff_date():
+                        fresh_items += 1
+                    else:
+                        stale_items += 1
+                except ValueError:
+                    stale_items += 1
+            else:
+                stale_items += 1
             if result:
                 summary["findings_new"] += 1
                 return True
             return False
         except Exception as e:
             log.error("DB error adding finding: %s", e)
-            summary["errors"].append(str(e))
+            _record_source_error("database", str(e))
             return False
 
     # --- Google Scholar: professors ---
     if "google_scholar" in sources:
         src_id = sources["google_scholar"]["id"]
+        _touch_source("google_scholar")
         for prof in active_profs:
             try:
                 for finding in scrape_google_scholar_professor(prof, src_id):
                     safe_add(finding)
+                    source_metrics["google_scholar"]["success"] += 1
                     _sleep(1)
             except Exception as e:
                 msg = f"Scholar professor {prof['name']}: {traceback.format_exc()}"
                 log.error(msg)
-                summary["errors"].append(msg)
+                source_metrics["google_scholar"]["fail"] += 1
+                _record_source_error("google_scholar", msg)
             summary["professors_scanned"] += 1
             _sleep(SCRAPER_DELAY_SECONDS)
 
     # --- Google Scholar: keywords ---
     if "google_scholar" in sources:
         src_id = sources["google_scholar"]["id"]
+        _touch_source("google_scholar")
         for kw in active_kws:
             try:
                 for finding in scrape_google_scholar_keyword(kw, src_id):
                     safe_add(finding)
+                    source_metrics["google_scholar"]["success"] += 1
             except Exception as e:
                 msg = f"Scholar keyword {kw['keyword']}: {e}"
                 log.error(msg)
-                summary["errors"].append(msg)
+                source_metrics["google_scholar"]["fail"] += 1
+                _record_source_error("google_scholar", msg)
             _sleep(SCRAPER_DELAY_SECONDS)
 
     # --- arXiv ---
     if "arxiv" in sources:
         src_id = sources["arxiv"]["id"]
+        _touch_source("arxiv")
         try:
             for finding in scrape_arxiv_keywords(active_kws, src_id):
                 safe_add(finding)
+                source_metrics["arxiv"]["success"] += 1
         except Exception as e:
             msg = f"arXiv scan: {e}"
             log.error(msg)
-            summary["errors"].append(msg)
+            source_metrics["arxiv"]["fail"] += 1
+            _record_source_error("arxiv", msg)
 
     # --- GitHub: professors ---
     if "github" in sources:
         src_id = sources["github"]["id"]
+        _touch_source("github")
         for prof in active_profs:
             try:
                 for finding in scrape_github_professor(prof, src_id):
                     safe_add(finding)
+                    source_metrics["github"]["success"] += 1
             except Exception as e:
                 msg = f"GitHub professor {prof['name']}: {e}"
                 log.error(msg)
-                summary["errors"].append(msg)
+                source_metrics["github"]["fail"] += 1
+                _record_source_error("github", msg)
             _sleep(1)
 
     # --- GitHub: keywords ---
     if "github" in sources:
         src_id = sources["github"]["id"]
+        _touch_source("github")
         for kw in active_kws:
             try:
                 for finding in scrape_github_keyword(kw, src_id):
                     safe_add(finding)
+                    source_metrics["github"]["success"] += 1
             except Exception as e:
                 msg = f"GitHub keyword {kw['keyword']}: {e}"
                 log.error(msg)
-                summary["errors"].append(msg)
+                source_metrics["github"]["fail"] += 1
+                _record_source_error("github", msg)
             _sleep(1)
 
     # --- CNKI ---
     if "cnki" in sources:
         src_id = sources["cnki"]["id"]
+        _touch_source("cnki")
         zh_kws = [k for k in active_kws if k.get("language") == "zh"]
         for kw in zh_kws:
             try:
                 for finding in scrape_cnki(kw, src_id):
                     safe_add(finding)
+                    source_metrics["cnki"]["success"] += 1
             except Exception as e:
                 msg = f"CNKI keyword {kw['keyword']}: {e}"
                 log.error(msg)
-                summary["errors"].append(msg)
+                source_metrics["cnki"]["fail"] += 1
+                _record_source_error("cnki", msg)
             _sleep(SCRAPER_DELAY_SECONDS * 2)
 
     # --- Baidu Scholar ---
     if "baidu_scholar" in sources:
         src_id = sources["baidu_scholar"]["id"]
+        _touch_source("baidu_scholar")
         for kw in active_kws:
             try:
                 for finding in scrape_baidu_scholar(kw, src_id):
                     safe_add(finding)
+                    source_metrics["baidu_scholar"]["success"] += 1
             except Exception as e:
                 msg = f"Baidu Scholar keyword {kw['keyword']}: {e}"
                 log.error(msg)
-                summary["errors"].append(msg)
+                source_metrics["baidu_scholar"]["fail"] += 1
+                _record_source_error("baidu_scholar", msg)
             _sleep(SCRAPER_DELAY_SECONDS)
 
+    # --- University admissions intelligence ---
+    try:
+        discovered = discover_university_sources()
+        for uni in discovered:
+            uni_summary = scrape_university_pages(uni, db_path=db_path, snapshot_id=snapshot_id)
+            summary["entities_created"] += uni_summary.get("programs_created", 0)
+            summary["entities_updated"] += uni_summary.get("programs_updated", 0)
+            summary["inconsistencies_detected"] += uni_summary.get("programs_with_inconsistency", 0)
+            _record_uni_counter(
+                uni_summary.get("university", "unknown_university"),
+                success=uni_summary.get("programs_created", 0) + uni_summary.get("programs_updated", 0),
+                fail=uni_summary.get("connector_fail", 0),
+            )
+            _record_connector_counter(
+                uni_summary.get("connector_name", "unknown_connector"),
+                success=uni_summary.get("connector_success", 0),
+                fail=uni_summary.get("connector_fail", 0),
+            )
+            if uni_summary.get("errors"):
+                for err in uni_summary["errors"]:
+                    _record_source_error(uni_summary.get("connector_name", "university_connector"), err)
+    except Exception as e:
+        msg = f"University intelligence scan: {e}"
+        log.error(msg)
+        _record_source_error("university", msg)
+
     summary["keywords_scanned"] = len(active_kws)
+
+    change_summary = db.get_change_summary_for_ui(snapshot_id=snapshot_id, db_path=db_path)
+    summary["change_summary"] = change_summary
+    summary["entities_created"] = change_summary["totals"]["added"]
+    summary["entities_updated"] = change_summary["totals"]["modified"]
+    summary["entities_removed"] = change_summary["totals"]["removed"]
+    summary["entity_changes_by_type"] = change_summary["by_entity"]
+
+    scoring_summary = score_snapshot(snapshot_id=snapshot_id, db_path=db_path)
+    summary["programs_scored"] = scoring_summary.get("programs_scored", 0)
+    summary["programs_omitted"] = scoring_summary.get("programs_omitted", 0)
+    summary["score_omitted_cases"] = scoring_summary.get("omitted_cases", [])
+    critical_nulls = len(summary["score_omitted_cases"])
+    total_connector_success = sum(v.get("success", 0) for v in source_metrics.values())
+    total_connector_fail = sum(v.get("fail", 0) for v in source_metrics.values())
+    freshness_total = fresh_items + stale_items
+    freshness_ratio = (fresh_items / freshness_total) if freshness_total else 0.0
+    coverage_den = total_connector_success + total_connector_fail
+    coverage_ratio = (total_connector_success / coverage_den) if coverage_den else 0.0
+
+    p0_reasons: list[str] = []
+    if coverage_ratio < 0.70:
+        p0_reasons.append("Cobertura por debajo del 70%")
+    if freshness_ratio < 0.60:
+        p0_reasons.append("Freshness por debajo del 60%")
+    if summary["inconsistencies_detected"] > 5:
+        p0_reasons.append("Muchas inconsistencias detectadas")
+    if critical_nulls > 0:
+        p0_reasons.append("Hay nulos críticos en campos de scoring")
+    if len(summary["errors"]) > 0:
+        p0_reasons.append("Se registraron errores en conectores")
+
+    if not p0_reasons:
+        p0_status = "green"
+    elif coverage_ratio < 0.50 or freshness_ratio < 0.40 or critical_nulls > 8:
+        p0_status = "red"
+    else:
+        p0_status = "yellow"
+    summary["p0_status"] = p0_status
+    summary["p0_reasons"] = p0_reasons
+
+    summary["metrics"] = {
+        "coverage": {
+            "ratio": round(coverage_ratio, 4),
+            "success": total_connector_success,
+            "fail": total_connector_fail,
+        },
+        "freshness": {
+            "ratio": round(freshness_ratio, 4),
+            "fresh_items": fresh_items,
+            "stale_items": stale_items,
+        },
+        "inconsistencies": {
+            "count": summary["inconsistencies_detected"],
+        },
+        "critical_nulls": {
+            "count": critical_nulls,
+        },
+        "errors_by_source": summary["errors_by_source"],
+    }
+
+    db.update_snapshot_summary(
+        snapshot_id,
+        {
+            "programs_scored": summary["programs_scored"],
+            "programs_omitted": summary["programs_omitted"],
+            "score_omitted_cases": summary["score_omitted_cases"],
+            "metrics": summary["metrics"],
+            "p0_status": summary["p0_status"],
+            "p0_reasons": summary["p0_reasons"],
+            "errors_by_source": summary["errors_by_source"],
+            "change_summary": change_summary,
+            "university_counters": summary["university_counters"],
+            "connector_counters": summary["connector_counters"],
+            "scan_week": datetime.now(timezone.utc).strftime("%G-W%V"),
+        },
+        db_path,
+    )
+    db.close_snapshot(snapshot_id, db_path)
     return summary

@@ -13,7 +13,8 @@ Este repositorio hoy combina:
 - ✅ Las 6 tareas iniciales del plan de implementación están incorporadas en código (modelo de datos PRD, tracking de universidades/programas, snapshots/diff, consola de decisión y semillas configurables).
 - ✅ El scoring multicriterio PRD ya corre de forma automática por snapshot (`scoring.py`) y persiste sub-scores explicables en `score_breakdowns`.
 - ✅ Se aplica umbral global de confianza (`MIN_CONFIDENCE_TO_RANK`) para bloquear programas de baja confiabilidad en el ranking.
-- ⚠️ Pendiente: endurecimiento de conectores por universidad, observabilidad persistente y panel de calidad de datos.
+- ✅ Hardening de conectores por universidad completado para dominios prioritarios Shenzhen (SUSTech/HITSZ/SZU + SIGS Tsinghua + PKU Shenzhen Graduate School), con fallback selector → tabla → regex, retry por dominio y metadatos de troubleshooting.
+- ⚠️ Pendiente: panel de calidad de datos y observabilidad agregada persistente en dashboard.
 
 Ver detalle en:
 - `docs/IMPLEMENTATION_STATUS.md`
@@ -90,5 +91,5 @@ Umbral por defecto: `BACKFILL_MIN_QUALITY_RATIO=0.55` (configurable por variable
 ## Roadmap inmediato
 
 Los siguientes pasos técnicos priorizados están documentados en `docs/NEXT_STEPS.md` y se enfocan en:
-- robustecer conectores por universidad;
-- y endurecer calidad/observabilidad de datos.
+- consolidar panel de calidad de datos por snapshot/fuente;
+- y endurecer observabilidad operacional de punta a punta.

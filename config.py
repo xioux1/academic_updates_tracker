@@ -72,6 +72,8 @@ UNIVERSITY_SOURCE_SEEDS: list[dict] = json.loads(
             {"name": "SUSTech", "base_urls": ["https://www.sustech.edu.cn/en/"]},
             {"name": "Harbin Institute of Technology, Shenzhen", "base_urls": ["https://www.hitsz.edu.cn/indexen.html"]},
             {"name": "Shenzhen University", "base_urls": ["https://www.szu.edu.cn/en/"]},
+            {"name": "Tsinghua Shenzhen International Graduate School", "base_urls": ["https://www.sigs.tsinghua.edu.cn/en/"]},
+            {"name": "Peking University Shenzhen Graduate School", "base_urls": ["https://www.sgs.pku.edu.cn/english/"]},
         ]),
     )
 )

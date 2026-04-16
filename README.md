@@ -11,7 +11,9 @@ Este repositorio hoy combina:
 ## Estado actual
 
 - ✅ Las 6 tareas iniciales del plan de implementación están incorporadas en código (modelo de datos PRD, tracking de universidades/programas, snapshots/diff, consola de decisión y semillas configurables).
-- ⚠️ El scoring multicriterio completo del PRD está parcialmente implementado (existe infraestructura `score_breakdowns`, pero faltan jobs de cálculo sistemático por sub-score).
+- ✅ El scoring multicriterio PRD ya corre de forma automática por snapshot (`scoring.py`) y persiste sub-scores explicables en `score_breakdowns`.
+- ✅ Se aplica umbral global de confianza (`MIN_CONFIDENCE_TO_RANK`) para bloquear programas de baja confiabilidad en el ranking.
+- ⚠️ Pendiente: endurecimiento de conectores por universidad, observabilidad persistente y panel de calidad de datos.
 
 Ver detalle en:
 - `docs/IMPLEMENTATION_STATUS.md`
@@ -88,6 +90,5 @@ Umbral por defecto: `BACKFILL_MIN_QUALITY_RATIO=0.55` (configurable por variable
 ## Roadmap inmediato
 
 Los siguientes pasos técnicos priorizados están documentados en `docs/NEXT_STEPS.md` y se enfocan en:
-- consolidar scoring PRD explicable;
 - robustecer conectores por universidad;
 - y endurecer calidad/observabilidad de datos.

@@ -49,6 +49,8 @@ SEED_PRIORITY_ORDER = [
     "SUSTech",
     "Harbin Institute of Technology, Shenzhen",
     "Shenzhen University",
+    "Tsinghua Shenzhen International Graduate School",
+    "Peking University Shenzhen Graduate School",
 ]
 
 CONNECTOR_VERSION = "2026.04.16"
@@ -330,8 +332,50 @@ CONNECTOR_REGISTRY: dict[str, dict[str, Any]] = {
     "Shenzhen University": {
         "selectors": ["main", "#vsb_content", ".article-content", ".v_news_content"],
         "fallback_selectors": ["#content", "body"],
-        "normalizers": ["regex", "table"],
+        "normalizers": ["selector", "table", "regex"],
+        "field_selectors": {
+            "language": ["#vsb_content .program-language", ".article-content .program-language"],
+            "duration": ["#vsb_content .program-duration", ".article-content .program-duration"],
+            "tuition": ["#vsb_content .program-tuition", ".article-content .program-tuition"],
+            "requirements": ["#vsb_content .program-requirements", ".article-content .program-requirements"],
+            "deadlines": ["#vsb_content .program-deadline", ".article-content .program-deadline"],
+            "portal": ["#vsb_content a.apply-link", ".article-content a.apply-link"],
+        },
     },
+    "Tsinghua Shenzhen International Graduate School": {
+        "selectors": ["main", ".detail-content", ".page-content", ".article-content"],
+        "fallback_selectors": ["#content", "body"],
+        "normalizers": ["selector", "table", "regex"],
+        "field_selectors": {
+            "language": [".detail-content .program-language", ".page-content .program-language"],
+            "duration": [".detail-content .program-duration", ".page-content .program-duration"],
+            "tuition": [".detail-content .program-tuition", ".page-content .program-tuition"],
+            "requirements": [".detail-content .program-requirements", ".page-content .program-requirements"],
+            "deadlines": [".detail-content .program-deadline", ".page-content .program-deadline"],
+            "portal": [".detail-content a.apply-link", ".page-content a.apply-link"],
+        },
+    },
+    "Peking University Shenzhen Graduate School": {
+        "selectors": ["main", "#mainContent", ".article-content", ".content"],
+        "fallback_selectors": ["#content", "body"],
+        "normalizers": ["selector", "table", "regex"],
+        "field_selectors": {
+            "language": ["#mainContent .program-language", ".article-content .program-language"],
+            "duration": ["#mainContent .program-duration", ".article-content .program-duration"],
+            "tuition": ["#mainContent .program-tuition", ".article-content .program-tuition"],
+            "requirements": ["#mainContent .program-requirements", ".article-content .program-requirements"],
+            "deadlines": ["#mainContent .program-deadline", ".article-content .program-deadline"],
+            "portal": ["#mainContent a.apply-link", ".article-content a.apply-link"],
+        },
+    },
+}
+
+DOMAIN_CONNECTOR_OVERRIDES: dict[str, dict[str, Any]] = {
+    "www.sustech.edu.cn": CONNECTOR_REGISTRY["SUSTech"],
+    "www.hitsz.edu.cn": CONNECTOR_REGISTRY["Harbin Institute of Technology, Shenzhen"],
+    "www.szu.edu.cn": CONNECTOR_REGISTRY["Shenzhen University"],
+    "www.sigs.tsinghua.edu.cn": CONNECTOR_REGISTRY["Tsinghua Shenzhen International Graduate School"],
+    "www.sgs.pku.edu.cn": CONNECTOR_REGISTRY["Peking University Shenzhen Graduate School"],
 }
 
 
@@ -339,6 +383,8 @@ DOMAIN_RETRY_POLICY = {
     "www.sustech.edu.cn": {"attempts": 3, "backoff_factor": 1.3},
     "www.hitsz.edu.cn": {"attempts": 4, "backoff_factor": 1.6},
     "www.szu.edu.cn": {"attempts": 3, "backoff_factor": 1.4},
+    "www.sigs.tsinghua.edu.cn": {"attempts": 4, "backoff_factor": 1.7},
+    "www.sgs.pku.edu.cn": {"attempts": 4, "backoff_factor": 1.8},
 }
 
 
@@ -377,15 +423,51 @@ def _fetch_page_with_retry(url: str, timeout: int = 20) -> Optional[dict[str, An
     return None
 
 
+def _extract_with_selector_fallback(
+    source_url: str,
+    soup: BeautifulSoup,
+    field_selectors: dict[str, list[str]],
+) -> list[dict]:
+    extracted: dict[str, Optional[str]] = {}
+    evidences: dict[str, dict[str, str]] = {}
+    for field_name, selectors in field_selectors.items():
+        for selector in selectors:
+            node = soup.select_one(selector)
+            if not node:
+                continue
+            if field_name == "portal":
+                value = node.get("href", "")
+            else:
+                value = node.get_text(" ", strip=True)
+            value = _normalize_whitespace(value)
+            if not value:
+                continue
+            extracted[field_name] = value
+            evidences[field_name] = {
+                "snippet": value[:280],
+                "url": source_url,
+                "locator": f"selector:{selector}",
+            }
+            break
+
+    return _build_program_contract(
+        source_url=source_url,
+        program_name=_extract_program_title(soup.get_text(" ", strip=True), source_url),
+        critical_fields=extracted,
+        evidence=evidences,
+    )
+
+
 def _extract_programs_with_connector(university_name: str, soup: BeautifulSoup, source_url: str) -> tuple[list[dict], dict[str, Any]]:
-    connector = CONNECTOR_REGISTRY.get(
+    domain = urlparse(source_url).netloc
+    connector = DOMAIN_CONNECTOR_OVERRIDES.get(domain, CONNECTOR_REGISTRY.get(
         university_name,
         {
             "selectors": ["main", "article", "body"],
             "fallback_selectors": ["body"],
             "normalizers": ["regex"],
         },
-    )
+    ))
 
     parser_used = "html.parser"
     selectors_used = []
@@ -408,6 +490,11 @@ def _extract_programs_with_connector(university_name: str, soup: BeautifulSoup, 
 
     extracted: list[dict] = []
     normalizer_map: dict[str, Callable[..., list[dict]]] = {
+        "selector": lambda text, url, rows: _extract_with_selector_fallback(
+            source_url=url,
+            soup=soup,
+            field_selectors=connector.get("field_selectors", {}),
+        ),
         "regex": lambda text, url, rows: _extract_with_regex(text, url),
         "table": lambda text, url, rows: _extract_with_table_fallback(text, url, rows),
     }
@@ -423,9 +510,11 @@ def _extract_programs_with_connector(university_name: str, soup: BeautifulSoup, 
 
     metadata = {
         "parser_used": parser_used,
+        "connector_version": CONNECTOR_VERSION,
         "selector_version": CONNECTOR_VERSION,
         "selectors_used": selectors_used,
         "normalizer_used": normalizer_used,
+        "connector_domain": domain,
     }
     return extracted, metadata
 
@@ -653,9 +742,11 @@ def scrape_university_pages(
                 "redirect_chain": fetch_result.get("redirect_chain", []),
                 "attempts_used": fetch_result.get("attempts_used"),
                 "parser_used": connector_metadata.get("parser_used"),
+                "connector_version": connector_metadata.get("connector_version"),
                 "selector_version": connector_metadata.get("selector_version"),
                 "selectors_used": connector_metadata.get("selectors_used", []),
                 "normalizer_used": connector_metadata.get("normalizer_used"),
+                "connector_domain": connector_metadata.get("connector_domain"),
             }
             source_doc_id = _upsert_source_document(
                 conn=conn,
@@ -674,6 +765,12 @@ def scrape_university_pages(
 
                 derived_payload = dict(normalized_program["derived_data"])
                 derived_payload["source_url"] = url
+                derived_payload["connector_metadata"] = {
+                    "connector_version": connector_metadata.get("connector_version"),
+                    "selectors_used": connector_metadata.get("selectors_used", []),
+                    "normalizer_used": connector_metadata.get("normalizer_used"),
+                    "connector_domain": connector_metadata.get("connector_domain"),
+                }
 
                 p_data = {
                     "university_id": uni_id,

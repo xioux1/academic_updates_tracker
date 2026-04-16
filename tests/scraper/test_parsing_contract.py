@@ -135,3 +135,52 @@ def test_retry_policy_includes_shenzhen_university_domain_profile():
     assert "www.szu.edu.cn" in DOMAIN_RETRY_POLICY
     assert DOMAIN_RETRY_POLICY["www.szu.edu.cn"]["attempts"] >= 3
     assert DOMAIN_RETRY_POLICY["www.szu.edu.cn"]["backoff_factor"] > 1
+
+
+def test_tsinghua_sigs_connector_prefers_selector_chain_and_emits_connector_metadata():
+    html = _read_fixture("tsinghua_sigs_program.html")
+    soup = BeautifulSoup(html, "html.parser")
+
+    programs, metadata = _extract_programs_with_connector(
+        "Tsinghua Shenzhen International Graduate School",
+        soup,
+        "https://www.sigs.tsinghua.edu.cn/en/admissions/master-program",
+    )
+
+    assert programs
+    fields = programs[0]["critical_fields"]
+    assert fields["language"].lower() == "english"
+    assert fields["duration"].lower() == "2 years"
+    assert fields["tuition"].lower().startswith("rmb 88,000")
+    assert fields["deadlines"] == "2027-03-25"
+    assert fields["portal"] == "https://apply.sigs.tsinghua.edu.cn/graduate"
+    assert metadata["normalizer_used"] == "selector"
+    assert metadata["connector_version"]
+    assert metadata["selectors_used"] == ["main"]
+
+
+def test_pku_sgs_connector_falls_back_to_table_parser():
+    html = _read_fixture("pku_sgs_program.html")
+    soup = BeautifulSoup(html, "html.parser")
+
+    programs, metadata = _extract_programs_with_connector(
+        "Peking University Shenzhen Graduate School",
+        soup,
+        "https://www.sgs.pku.edu.cn/english/admissions/master",
+    )
+
+    assert programs
+    fields = programs[0]["critical_fields"]
+    assert fields["language"] == "English"
+    assert fields["duration"] == "2 years"
+    assert fields["tuition"] == "RMB 72,000 /year"
+    assert fields["deadlines"] == "April 10, 2027"
+    assert fields["portal"] == "https://apply.sgs.pku.edu.cn/master"
+    assert metadata["normalizer_used"] == "table"
+
+
+def test_retry_policy_includes_tsinghua_and_pku_shenzhen_domain_profiles():
+    assert "www.sigs.tsinghua.edu.cn" in DOMAIN_RETRY_POLICY
+    assert DOMAIN_RETRY_POLICY["www.sigs.tsinghua.edu.cn"]["attempts"] >= 4
+    assert "www.sgs.pku.edu.cn" in DOMAIN_RETRY_POLICY
+    assert DOMAIN_RETRY_POLICY["www.sgs.pku.edu.cn"]["backoff_factor"] > 1

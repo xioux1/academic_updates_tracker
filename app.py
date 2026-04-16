@@ -124,7 +124,7 @@ with st.sidebar:
     st.markdown("---")
     page = st.radio(
         "Navegación",
-        ["📊 Dashboard", "👨‍🏫 Profesores", "🔑 Keywords",
+        ["📊 Dashboard", "🧭 Decision Console", "👨‍🏫 Profesores", "🔑 Keywords",
          "📄 Findings", "📬 Digest", "⚙️ Configuración"],
         label_visibility="collapsed",
     )
@@ -140,6 +140,7 @@ with st.sidebar:
 _views_dir = os.path.join(os.path.dirname(__file__), "views")
 
 if   page == "📊 Dashboard":       exec(open(os.path.join(_views_dir, "dashboard.py")).read())
+elif page == "🧭 Decision Console": exec(open(os.path.join(_views_dir, "decision_console.py")).read())
 elif page == "👨‍🏫 Profesores":     exec(open(os.path.join(_views_dir, "professors.py")).read())
 elif page == "🔑 Keywords":         exec(open(os.path.join(_views_dir, "keywords.py")).read())
 elif page == "📄 Findings":         exec(open(os.path.join(_views_dir, "findings.py")).read())

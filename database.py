@@ -521,6 +521,20 @@ def update_snapshot_summary(snapshot_id: int, summary: dict, db_path: str = DB_P
         conn.close()
 
 
+def update_snapshot_run_metadata(snapshot_id: int, run_metadata: dict, db_path: str = DB_PATH) -> None:
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            """UPDATE scan_snapshots
+               SET run_metadata=?
+               WHERE id=?""",
+            (_json_blob(run_metadata), snapshot_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_scan_snapshot(snapshot_id: int, db_path: str = DB_PATH) -> Optional[dict]:
     conn = get_connection(db_path)
     try:
@@ -1734,6 +1748,43 @@ def get_operational_metrics(db_path: str = DB_PATH, limit: int = 8) -> dict:
         "week_ago": week_ago,
         "comparison": comparison,
         "history": snapshots,
+    }
+
+
+def get_latest_extraction_quality_snapshot(db_path: str = DB_PATH) -> dict:
+    """
+    Return a compact extraction quality payload for dashboard consumption.
+    """
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT id, started_at, closed_at, run_metadata, summary_json
+            FROM scan_snapshots
+            WHERE status='closed'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return {}
+
+    record = dict(row)
+    run_metadata = _json_loads(record.get("run_metadata"))
+    summary = _json_loads(record.get("summary_json"))
+    snapshot = (
+        run_metadata.get("extraction_quality_snapshot")
+        or summary.get("extraction_quality_snapshot")
+        or {}
+    )
+    return {
+        "snapshot_id": record.get("id"),
+        "started_at": record.get("started_at"),
+        "closed_at": record.get("closed_at"),
+        "extraction_quality_snapshot": snapshot,
     }
 
 

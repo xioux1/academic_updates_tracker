@@ -31,6 +31,7 @@ import arxiv
 
 import os
 from scoring import score_snapshot
+from normalization import normalize_program_payload
 
 from config import (
     BROWSER_HEADERS,
@@ -660,14 +661,21 @@ def scrape_university_pages(
                 technical_metadata=technical_metadata,
             )
             for program in extracted_programs:
+                normalized_program = normalize_program_payload(program)
+                official_critical = dict(program.get("critical_fields", {}))
+                official_critical["normalization_trace"] = normalized_program["official_data"]
+
+                derived_payload = dict(normalized_program["derived_data"])
+                derived_payload["source_url"] = url
+
                 p_data = {
                     "university_id": uni_id,
-                    "name": program["name"],
+                    "name": normalized_program.get("canonical_name") or program["name"],
                     "degree_level": program["degree_level"],
                     "delivery_mode": program["delivery_mode"],
                     "status": program["status"],
-                    "official_data": program["critical_fields"],
-                    "derived_data": {"source_url": url},
+                    "official_data": official_critical,
+                    "derived_data": derived_payload,
                 }
                 program_id, change_type, inconsistency_flag = db.upsert_program_with_audit(
                     p_data,

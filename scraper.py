@@ -272,7 +272,11 @@ def extract_programs_from_admission_pages(
     ]
 
 
-def scrape_university_pages(university: dict, db_path: Optional[str] = None) -> dict:
+def scrape_university_pages(
+    university: dict,
+    db_path: Optional[str] = None,
+    snapshot_id: Optional[int] = None,
+) -> dict:
     """
     Scrape university candidate pages, persist source_documents/evidence, and create programs.
     """
@@ -284,6 +288,9 @@ def scrape_university_pages(university: dict, db_path: Optional[str] = None) -> 
 
     conn = db.get_connection(db_path)
     created_programs = 0
+    updated_programs = 0
+    unchanged_programs = 0
+    inconsistent_programs = 0
     processed_urls = 0
 
     try:
@@ -332,12 +339,19 @@ def scrape_university_pages(university: dict, db_path: Optional[str] = None) -> 
                     "official_data": program["critical_fields"],
                     "derived_data": {"source_url": url},
                 }
-                try:
-                    program_id = db.add_program(p_data, db_path)
+                program_id, change_type, inconsistency_flag = db.upsert_program_with_audit(
+                    p_data,
+                    snapshot_id=snapshot_id,
+                    db_path=db_path,
+                )
+                if change_type == "new":
                     created_programs += 1
-                except Exception:
-                    # Skip duplicates due to UNIQUE constraints.
-                    continue
+                elif change_type == "updated":
+                    updated_programs += 1
+                else:
+                    unchanged_programs += 1
+                if inconsistency_flag:
+                    inconsistent_programs += 1
 
                 for field_name, ev in program["evidence"].items():
                     _insert_evidence_snippet(
@@ -353,7 +367,14 @@ def scrape_university_pages(university: dict, db_path: Optional[str] = None) -> 
             _sleep(0.4)
 
         conn.commit()
-        return {"university": uni_name, "processed_urls": processed_urls, "programs_created": created_programs}
+        return {
+            "university": uni_name,
+            "processed_urls": processed_urls,
+            "programs_created": created_programs,
+            "programs_updated": updated_programs,
+            "programs_unchanged": unchanged_programs,
+            "programs_with_inconsistency": inconsistent_programs,
+        }
     finally:
         conn.close()
 
@@ -897,8 +918,21 @@ def run_full_scan(db_path: str = None) -> dict:
         "keywords_scanned": 0,
         "findings_total": 0,
         "findings_new": 0,
+        "entities_created": 0,
+        "entities_updated": 0,
+        "entities_removed": 0,
+        "entity_changes_by_type": {},
+        "inconsistencies_detected": 0,
         "errors": [],
     }
+    snapshot_id = db.create_snapshot(
+        {
+            "scan_type": "full_scan",
+            "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        db_path,
+    )
+    summary["snapshot_id"] = snapshot_id
 
     professors = db.get_all_professors(db_path)
     keywords = db.get_all_keywords(db_path)
@@ -1012,5 +1046,25 @@ def run_full_scan(db_path: str = None) -> dict:
                 summary["errors"].append(msg)
             _sleep(SCRAPER_DELAY_SECONDS)
 
+    # --- University admissions intelligence ---
+    try:
+        discovered = discover_university_sources()
+        for uni in discovered:
+            uni_summary = scrape_university_pages(uni, db_path=db_path, snapshot_id=snapshot_id)
+            summary["entities_created"] += uni_summary.get("programs_created", 0)
+            summary["entities_updated"] += uni_summary.get("programs_updated", 0)
+            summary["inconsistencies_detected"] += uni_summary.get("programs_with_inconsistency", 0)
+    except Exception as e:
+        msg = f"University intelligence scan: {e}"
+        log.error(msg)
+        summary["errors"].append(msg)
+
     summary["keywords_scanned"] = len(active_kws)
+
+    change_summary = db.get_change_summary_for_ui(snapshot_id=snapshot_id, db_path=db_path)
+    summary["entities_created"] = change_summary["totals"]["added"]
+    summary["entities_updated"] = change_summary["totals"]["modified"]
+    summary["entities_removed"] = change_summary["totals"]["removed"]
+    summary["entity_changes_by_type"] = change_summary["by_entity"]
+    db.close_snapshot(snapshot_id, db_path)
     return summary

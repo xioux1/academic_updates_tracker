@@ -6,6 +6,7 @@ Handles schema creation, seeding, and CRUD for every table.
 import sqlite3
 import json
 import os
+import copy
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -154,6 +155,7 @@ CREATE TABLE IF NOT EXISTS programs (
     official_data    TEXT NOT NULL DEFAULT '{}',
     derived_data     TEXT NOT NULL DEFAULT '{}',
     inferred_data    TEXT NOT NULL DEFAULT '{}',
+    inconsistency_flag INTEGER NOT NULL DEFAULT 0,
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL,
     UNIQUE(university_id, school_id, name)
@@ -213,6 +215,28 @@ CREATE TABLE IF NOT EXISTS snapshots (
     created_at       TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS scan_snapshots (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at       TEXT NOT NULL,
+    closed_at        TEXT,
+    status           TEXT NOT NULL DEFAULT 'open'
+                       CHECK(status IN ('open','closed')),
+    run_metadata     TEXT NOT NULL DEFAULT '{}',
+    summary_json     TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS snapshot_entities (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_id      INTEGER NOT NULL REFERENCES scan_snapshots(id) ON DELETE CASCADE,
+    entity_type      TEXT NOT NULL,
+    entity_id        INTEGER NOT NULL,
+    payload          TEXT NOT NULL,
+    change_type      TEXT NOT NULL
+                       CHECK(change_type IN ('new','updated','deleted','unchanged')),
+    inconsistency_flag INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit_records (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_type      TEXT NOT NULL,
@@ -259,6 +283,9 @@ CREATE INDEX IF NOT EXISTS idx_audit_entity_detected
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_created_at
     ON snapshots(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_snapshot_entities_snapshot
+    ON snapshot_entities(snapshot_id, entity_type, entity_id);
 """
 
 SEED_PROFESSORS = [
@@ -357,6 +384,7 @@ def init_db(db_path: str = DB_PATH) -> None:
         # Lightweight forward-compatible migrations for existing DB files.
         _ensure_column(conn, "source_documents", "source_priority", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "source_documents", "content_hash", "TEXT")
+        _ensure_column(conn, "programs", "inconsistency_flag", "INTEGER NOT NULL DEFAULT 0")
         conn.commit()
 
         # Only seed if tables are empty
@@ -424,6 +452,189 @@ def _json_blob(data: Optional[dict]) -> str:
     return json.dumps(data or {}, ensure_ascii=False)
 
 
+def _json_loads(raw: Optional[str]) -> dict:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+SENSITIVE_FIELDS = {"requirements", "deadlines", "tuition", "duration", "faculty"}
+
+
+def create_snapshot(run_metadata: Optional[dict], db_path: str = DB_PATH) -> int:
+    ts = now_iso()
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO scan_snapshots (started_at, run_metadata, summary_json)
+               VALUES (?,?,?)""",
+            (ts, _json_blob(run_metadata), _json_blob({})),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def close_snapshot(snapshot_id: int, db_path: str = DB_PATH) -> None:
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            """UPDATE scan_snapshots
+               SET status='closed', closed_at=?
+               WHERE id=?""",
+            (now_iso(), snapshot_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _latest_snapshot_entities(conn: sqlite3.Connection, snapshot_id: int) -> dict[tuple[str, int], dict]:
+    rows = conn.execute(
+        """SELECT entity_type, entity_id, payload, change_type, inconsistency_flag
+           FROM snapshot_entities
+           WHERE snapshot_id=?
+           ORDER BY id DESC""",
+        (snapshot_id,),
+    ).fetchall()
+    latest: dict[tuple[str, int], dict] = {}
+    for row in rows:
+        key = (row["entity_type"], row["entity_id"])
+        if key in latest:
+            continue
+        latest[key] = {
+            "payload": _json_loads(row["payload"]),
+            "change_type": row["change_type"],
+            "inconsistency_flag": bool(row["inconsistency_flag"]),
+        }
+    return latest
+
+
+def diff_snapshot(previous_snapshot_id: int, current_snapshot_id: int, db_path: str = DB_PATH) -> dict:
+    conn = get_connection(db_path)
+    try:
+        previous = _latest_snapshot_entities(conn, previous_snapshot_id)
+        current = _latest_snapshot_entities(conn, current_snapshot_id)
+    finally:
+        conn.close()
+
+    all_keys = set(previous.keys()) | set(current.keys())
+    by_entity: dict[str, dict] = {}
+    detailed_changes: list[dict] = []
+    for entity_type, entity_id in sorted(all_keys):
+        prev = previous.get((entity_type, entity_id))
+        curr = current.get((entity_type, entity_id))
+        if entity_type not in by_entity:
+            by_entity[entity_type] = {"added": 0, "removed": 0, "modified": 0}
+        if prev is None and curr is not None:
+            by_entity[entity_type]["added"] += 1
+            detailed_changes.append({"entity_type": entity_type, "entity_id": entity_id, "change": "added"})
+        elif prev is not None and curr is None:
+            by_entity[entity_type]["removed"] += 1
+            detailed_changes.append({"entity_type": entity_type, "entity_id": entity_id, "change": "removed"})
+        elif prev and curr and prev["payload"] != curr["payload"]:
+            by_entity[entity_type]["modified"] += 1
+            detailed_changes.append({"entity_type": entity_type, "entity_id": entity_id, "change": "modified"})
+
+    totals = {"added": 0, "removed": 0, "modified": 0}
+    for counters in by_entity.values():
+        for key in totals:
+            totals[key] += counters[key]
+
+    return {"totals": totals, "by_entity": by_entity, "changes": detailed_changes}
+
+
+def tag_snapshot_entity(
+    snapshot_id: int,
+    entity_type: str,
+    entity_id: int,
+    payload: dict,
+    change_type: str,
+    inconsistency_flag: bool = False,
+    db_path: str = DB_PATH,
+) -> int:
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO snapshot_entities
+               (snapshot_id, entity_type, entity_id, payload, change_type, inconsistency_flag, created_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (
+                snapshot_id,
+                entity_type,
+                entity_id,
+                _json_blob(payload),
+                change_type,
+                1 if inconsistency_flag else 0,
+                now_iso(),
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def add_audit_record(
+    entity_type: str,
+    entity_id: int,
+    change_type: str,
+    details: dict,
+    db_path: str = DB_PATH,
+) -> int:
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            """INSERT INTO audit_records
+               (entity_type, entity_id, change_type, detected_at, details)
+               VALUES (?,?,?,?,?)""",
+            (entity_type, entity_id, change_type, now_iso(), _json_blob(details)),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_change_summary_for_ui(
+    snapshot_id: int,
+    previous_snapshot_id: Optional[int] = None,
+    db_path: str = DB_PATH,
+) -> dict:
+    if previous_snapshot_id is None:
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                """SELECT id FROM scan_snapshots
+                   WHERE id < ?
+                   ORDER BY id DESC
+                   LIMIT 1""",
+                (snapshot_id,),
+            ).fetchone()
+            previous_snapshot_id = row["id"] if row else None
+        finally:
+            conn.close()
+    if previous_snapshot_id is None:
+        return {
+            "snapshot_id": snapshot_id,
+            "previous_snapshot_id": None,
+            "totals": {"added": 0, "removed": 0, "modified": 0},
+            "by_entity": {},
+            "changes": [],
+        }
+    diff = diff_snapshot(previous_snapshot_id, snapshot_id, db_path)
+    return {
+        "snapshot_id": snapshot_id,
+        "previous_snapshot_id": previous_snapshot_id,
+        **diff,
+    }
+
+
 def add_university(data: dict, db_path: str = DB_PATH) -> int:
     ts = now_iso()
     conn = get_connection(db_path)
@@ -489,6 +700,175 @@ def add_program(data: dict, db_path: str = DB_PATH) -> int:
         return cur.lastrowid
     finally:
         conn.close()
+
+
+def _get_program_by_key(
+    conn: sqlite3.Connection,
+    university_id: int,
+    school_id: Optional[int],
+    name: str,
+) -> Optional[sqlite3.Row]:
+    if school_id is None:
+        return conn.execute(
+            """SELECT * FROM programs
+               WHERE university_id=? AND school_id IS NULL AND name=?
+               LIMIT 1""",
+            (university_id, name),
+        ).fetchone()
+    return conn.execute(
+        """SELECT * FROM programs
+           WHERE university_id=? AND school_id=? AND name=?
+           LIMIT 1""",
+        (university_id, school_id, name),
+    ).fetchone()
+
+
+def upsert_program_with_audit(
+    data: dict,
+    snapshot_id: Optional[int] = None,
+    db_path: str = DB_PATH,
+) -> tuple[int, str, bool]:
+    """
+    Upsert program records and detect sensitive changes/source inconsistencies.
+    Returns: (program_id, change_type, inconsistency_flag)
+    """
+    ts = now_iso()
+    incoming_official = copy.deepcopy(data.get("official_data") or {})
+    incoming_derived = copy.deepcopy(data.get("derived_data") or {})
+    source_url = (incoming_derived.get("source_url") or "").strip()
+    conn = get_connection(db_path)
+    try:
+        row = _get_program_by_key(conn, data["university_id"], data.get("school_id"), data["name"])
+        inconsistency_flag = False
+
+        if row is None:
+            source_values: dict[str, dict] = {}
+            for field in SENSITIVE_FIELDS:
+                field_values: dict[str, str] = {}
+                value = incoming_official.get(field)
+                if source_url and value not in (None, ""):
+                    field_values[source_url] = value
+                source_values[field] = field_values
+            incoming_derived["source_values"] = source_values
+            if source_url:
+                incoming_derived["last_source_url"] = source_url
+            cur = conn.execute(
+                """INSERT INTO programs
+                   (university_id, school_id, name, degree_level, delivery_mode, status,
+                    official_data, derived_data, inferred_data, created_at, updated_at, inconsistency_flag)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    data["university_id"],
+                    data.get("school_id"),
+                    data["name"],
+                    data.get("degree_level"),
+                    data.get("delivery_mode"),
+                    data.get("status"),
+                    _json_blob(incoming_official),
+                    _json_blob(incoming_derived),
+                    _json_blob(data.get("inferred_data")),
+                    ts,
+                    ts,
+                    0,
+                ),
+            )
+            program_id = cur.lastrowid
+            change_type = "new"
+        else:
+            program_id = row["id"]
+            old_official = _json_loads(row["official_data"])
+            old_derived = _json_loads(row["derived_data"])
+
+            field_changes: dict[str, dict] = {}
+            for field in SENSITIVE_FIELDS:
+                old_val = (old_official.get(field) or "").strip() if isinstance(old_official.get(field), str) else old_official.get(field)
+                new_val = (incoming_official.get(field) or "").strip() if isinstance(incoming_official.get(field), str) else incoming_official.get(field)
+                if old_val != new_val:
+                    field_changes[field] = {"before": old_val, "after": new_val}
+
+            known_values = old_derived.get("source_values", {})
+            source_values = known_values if isinstance(known_values, dict) else {}
+            for field in SENSITIVE_FIELDS:
+                existing = source_values.get(field, {})
+                if not isinstance(existing, dict):
+                    existing = {}
+                if source_url and field in incoming_official and incoming_official.get(field) not in (None, ""):
+                    existing[source_url] = incoming_official[field]
+                source_values[field] = existing
+                distinct_values = {str(v).strip() for v in existing.values() if str(v).strip()}
+                if len(distinct_values) > 1:
+                    inconsistency_flag = True
+
+            merged_derived = old_derived
+            merged_derived.update(incoming_derived)
+            merged_derived["source_values"] = source_values
+            merged_derived["last_source_url"] = source_url or old_derived.get("last_source_url")
+
+            conn.execute(
+                """UPDATE programs
+                   SET degree_level=?, delivery_mode=?, status=?,
+                       official_data=?, derived_data=?, inferred_data=?,
+                       updated_at=?, inconsistency_flag=?
+                   WHERE id=?""",
+                (
+                    data.get("degree_level"),
+                    data.get("delivery_mode"),
+                    data.get("status"),
+                    _json_blob(incoming_official),
+                    _json_blob(merged_derived),
+                    _json_blob(data.get("inferred_data")),
+                    ts,
+                    1 if inconsistency_flag else int(row["inconsistency_flag"] or 0),
+                    program_id,
+                ),
+            )
+            change_type = "updated" if field_changes else "unchanged"
+            if field_changes:
+                conn.execute(
+                    """INSERT INTO audit_records
+                       (entity_type, entity_id, change_type, detected_at, details)
+                       VALUES (?,?,?,?,?)""",
+                    (
+                        "program",
+                        program_id,
+                        "sensitive_fields_changed",
+                        ts,
+                        _json_blob({"fields": field_changes, "source_url": source_url}),
+                    ),
+                )
+            if inconsistency_flag:
+                conn.execute(
+                    """INSERT INTO audit_records
+                       (entity_type, entity_id, change_type, detected_at, details)
+                       VALUES (?,?,?,?,?)""",
+                    (
+                        "program",
+                        program_id,
+                        "source_inconsistency",
+                        ts,
+                        _json_blob({"sensitive_fields": sorted(SENSITIVE_FIELDS), "source_url": source_url}),
+                    ),
+                )
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    if snapshot_id:
+        tag_snapshot_entity(
+            snapshot_id=snapshot_id,
+            entity_type="program",
+            entity_id=program_id,
+            payload={
+                "name": data.get("name"),
+                "university_id": data.get("university_id"),
+                "official_data": incoming_official,
+            },
+            change_type=change_type,
+            inconsistency_flag=inconsistency_flag,
+            db_path=db_path,
+        )
+    return program_id, change_type, inconsistency_flag
 
 
 def get_programs(db_path: str = DB_PATH, university_id: Optional[int] = None) -> list[dict]:

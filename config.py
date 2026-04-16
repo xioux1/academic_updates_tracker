@@ -57,6 +57,18 @@ UNIVERSITY_SOURCE_SEEDS: list[dict] = json.loads(
 # arXiv categories of interest
 ARXIV_CATEGORIES: list[str] = ["cs.RO", "cs.SY", "eess.SY", "cs.AI", "eess.SP"]
 
+# ---------------------------------------------------------------------------
+# Ranking guardrails
+# ---------------------------------------------------------------------------
+
+# Programas por debajo de este umbral de confianza no son rankeables por defecto.
+MIN_CONFIDENCE_TO_RANK: float = float(os.environ.get("MIN_CONFIDENCE_TO_RANK", "0.35"))
+
+
+def get_min_confidence_to_rank() -> float:
+    """Return the normalized confidence threshold used to allow program ranking."""
+    return max(0.0, min(1.0, float(MIN_CONFIDENCE_TO_RANK)))
+
 # Browser-like headers for Chinese sources
 BROWSER_HEADERS: dict = {
     "User-Agent": (

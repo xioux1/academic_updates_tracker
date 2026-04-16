@@ -8,6 +8,7 @@ import json
 from typing import Optional
 
 import database as db
+import config as cfg
 
 
 def _loads(raw: Optional[str]) -> dict:
@@ -108,6 +109,49 @@ def information_confidence(program: dict, evidence_count: int, inconsistent: boo
     return _clip(score)
 
 
+def _build_rankability_metadata(
+    confidence_score: float,
+    evidence_count: int,
+    inconsistent: bool,
+) -> dict:
+    threshold = cfg.get_min_confidence_to_rank()
+    blocked = confidence_score < threshold
+
+    if not blocked:
+        return {
+            "ranking_blocked": False,
+            "ranking_block_reason": "",
+            "ranking_primary_issue": "",
+            "ranking_min_confidence_threshold": round(threshold, 4),
+        }
+
+    if inconsistent:
+        reason = (
+            f"Bloqueado para ranking: information_confidence={confidence_score:.3f} "
+            f"está bajo el umbral {threshold:.3f} y hay conflicto entre fuentes."
+        )
+        primary_issue = "source_inconsistency"
+    elif evidence_count <= 0:
+        reason = (
+            f"Bloqueado para ranking: information_confidence={confidence_score:.3f} "
+            f"está bajo el umbral {threshold:.3f} por falta de evidencia."
+        )
+        primary_issue = "evidence_count"
+    else:
+        reason = (
+            f"Bloqueado para ranking: information_confidence={confidence_score:.3f} "
+            f"está bajo el umbral {threshold:.3f}."
+        )
+        primary_issue = "information_confidence"
+
+    return {
+        "ranking_blocked": True,
+        "ranking_block_reason": reason,
+        "ranking_primary_issue": primary_issue,
+        "ranking_min_confidence_threshold": round(threshold, 4),
+    }
+
+
 def score_snapshot(snapshot_id: int, db_path: str) -> dict:
     conn = db.get_connection(db_path)
     results = {
@@ -152,7 +196,9 @@ def score_snapshot(snapshot_id: int, db_path: str) -> dict:
         l_fit = lifestyle_fit(program)
         c_lev = contact_leverage(program, faculty_by_uni.get(program["university_id"], 0))
         inconsistent = bool(program.get("inconsistency_flag"))
-        i_conf = information_confidence(program, evidence_by_program.get(program_id, 0), inconsistent)
+        evidence_count = evidence_by_program.get(program_id, 0)
+        i_conf = information_confidence(program, evidence_count, inconsistent)
+        rankability = _build_rankability_metadata(i_conf, evidence_count, inconsistent)
 
         overall = (
             (0.28 * a_fit)
@@ -168,11 +214,15 @@ def score_snapshot(snapshot_id: int, db_path: str) -> dict:
             "contact_leverage": round(c_lev, 4),
             "information_confidence": round(i_conf, 4),
             "confidence_score": round(i_conf, 4),
+            "evidence_count": evidence_count,
+            **rankability,
         }
         explanation = (
             "Weighted blend of admission, strategic, lifestyle, contact leverage, "
             "and information confidence sub-scores."
         )
+        if rankability["ranking_blocked"]:
+            explanation += f" {rankability['ranking_block_reason']}"
 
         db.upsert_score_breakdown(
             entity_type="program",

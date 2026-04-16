@@ -97,10 +97,19 @@ def _extract_evidence_url(program):
 
 
 def _find_confidence(components):
-    for key in ("confidence", "confidence_score", "source_confidence", "evidence_confidence"):
+    for key in ("information_confidence", "confidence_score", "confidence"):
         if key in components:
             return _to_float(components.get(key), default=0.0)
     return 0.0
+
+
+def _ranking_guard(components):
+    return {
+        "blocked": bool(components.get("ranking_blocked", False)),
+        "reason": str(components.get("ranking_block_reason") or "").strip(),
+        "primary_issue": str(components.get("ranking_primary_issue") or "").strip(),
+        "threshold": _to_float(components.get("ranking_min_confidence_threshold"), default=cfg.get_min_confidence_to_rank()),
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -209,7 +218,7 @@ if not programs:
 langs = sorted({(_extract_language(p) or "unknown") for p in programs})
 unis = sorted({p.get("university_name") for p in programs if p.get("university_name")})
 
-f1, f2, f3, f4, f5 = st.columns([1.1, 1.3, 1.2, 1.4, 1.4])
+f1, f2, f3, f4, f5, f6 = st.columns([1.1, 1.3, 1.2, 1.4, 1.4, 1.6])
 with f1:
     lang_filter = st.selectbox("Idioma", ["all"] + langs, format_func=lambda x: "Todos" if x == "all" else x.upper())
 with f2:
@@ -217,17 +226,27 @@ with f2:
 with f3:
     deadline_days = st.slider("Deadline ≤ días", min_value=0, max_value=365, value=120)
 with f4:
-    min_conf = st.slider("Confianza mínima", min_value=0.0, max_value=1.0, value=0.2, step=0.05)
+    min_conf = st.slider(
+        "Confianza mínima",
+        min_value=0.0,
+        max_value=1.0,
+        value=cfg.get_min_confidence_to_rank(),
+        step=0.05,
+    )
 with f5:
     top_n = st.slider("Top-N", min_value=3, max_value=30, value=10)
+with f6:
+    show_blocked = st.checkbox("Mostrar bloqueados", value=False)
 
 now = datetime.now(timezone.utc)
 filtered_programs = []
+blocked_programs_count = 0
 for p in programs:
     pid = p["id"]
     score_info = score_map.get(pid, {})
     components = _loads(score_info.get("latest_components"))
     confidence = _find_confidence(components)
+    guard = _ranking_guard(components)
     deadline = _extract_deadline(p)
     lang = _extract_language(p)
 
@@ -237,6 +256,8 @@ for p in programs:
         continue
     if confidence < min_conf:
         continue
+    if guard["blocked"]:
+        blocked_programs_count += 1
     if deadline:
         days_left = (deadline - now).days
         if days_left > deadline_days:
@@ -276,6 +297,11 @@ st.divider()
 # Top-N programas por overall_score
 # -----------------------------------------------------------------------------
 st.subheader("🏆 Top-N programas actuales")
+if blocked_programs_count > 0 and not show_blocked:
+    st.info(
+        f"Hay {blocked_programs_count} programas bloqueados por baja information_confidence. "
+        "Activa “Mostrar bloqueados” para inspeccionarlos."
+    )
 
 ranked = []
 for p in filtered_programs:
@@ -286,8 +312,11 @@ for p in filtered_programs:
     delta = latest_score - prev_score if score_info.get("previous_score") is not None else 0.0
     components = _loads(score_info.get("latest_components"))
     confidence = _find_confidence(components)
+    guard = _ranking_guard(components)
     evidence_url = _extract_evidence_url(p)
     deadline = _extract_deadline(p)
+    if guard["blocked"] and not show_blocked:
+        continue
     ranked.append({
         "program_id": pid,
         "program": p.get("name"),
@@ -297,6 +326,10 @@ for p in filtered_programs:
         "confidence": round(confidence, 3),
         "deadline": deadline.strftime("%Y-%m-%d") if deadline else "N/A",
         "evidence": evidence_url,
+        "blocked": guard["blocked"],
+        "block_reason": guard["reason"],
+        "primary_issue": guard["primary_issue"],
+        "threshold": round(guard["threshold"], 3),
         "sub_scores": components,
     })
 
@@ -311,6 +344,7 @@ else:
             "Overall": r["overall_score"],
             "Δ": r["delta"],
             "Confianza": r["confidence"],
+            "Estado ranking": "🚫 Bloqueado" if r["blocked"] else "✅ Habilitado",
             "Deadline": r["deadline"],
         }
         for r in ranked
@@ -321,6 +355,14 @@ else:
     for i, row in enumerate(ranked, start=1):
         with st.expander(f"#{i} · {row['program']} ({row['university']})"):
             st.write(f"**Overall score:** {row['overall_score']} · **Confianza:** {row['confidence']}")
+            if row["blocked"]:
+                st.error(
+                    "Programa bloqueado para ranking. "
+                    f"Razón: {row['block_reason'] or 'Sin razón detallada.'} "
+                    f"Campo principal: {row['primary_issue'] or 'information_confidence'}."
+                )
+            else:
+                st.success("Programa habilitado para ranking.")
             sub_scores = row["sub_scores"] or {}
             visible_sub = {
                 k: v for k, v in sub_scores.items()

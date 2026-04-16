@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from bs4 import BeautifulSoup
 
 from scraper import (
@@ -184,6 +185,70 @@ def test_fetch_retry_enforces_minimum_attempts(monkeypatch):
         del DOMAIN_RETRY_POLICY["example.edu"]
     else:
         DOMAIN_RETRY_POLICY["example.edu"] = original_policy
+
+
+@pytest.mark.parametrize(
+    "university_name, fixture_name, source_url, selector",
+    [
+        ("SUSTech", "sustech_program.html", "https://www.sustech.edu.cn/en/graduate-program", "main"),
+        ("Harbin Institute of Technology, Shenzhen", "hitsz_program.html", "https://www.hitsz.edu.cn/admissions/master", "#content"),
+        ("Shenzhen University", "szu_program.html", "https://www.szu.edu.cn/en/graduate-program", "#vsb_content"),
+    ],
+)
+def test_connector_fixtures_extract_all_critical_fields_and_evidence(university_name, fixture_name, source_url, selector):
+    html = _read_fixture(fixture_name)
+    soup = BeautifulSoup(html, "html.parser")
+
+    programs, metadata = _extract_programs_with_connector(university_name, soup, source_url)
+
+    assert programs
+    program = programs[0]
+    fields = program["critical_fields"]
+
+    for field in CRITICAL_FIELD_KEYS:
+        assert field in fields
+        assert fields[field]
+
+    assert sorted(program["evidence_by_field"].keys()) == sorted(CRITICAL_FIELD_KEYS)
+    for field in CRITICAL_FIELD_KEYS:
+        assert program["evidence_by_field"][field]["snippet"] != "not_found"
+
+    assert metadata["selectors_used"] == [selector]
+
+
+def test_regex_date_and_currency_edge_case_fixture():
+    text = _read_fixture("date_currency_edge_cases.txt")
+
+    fields, evidence = _extract_critical_fields_from_text(text, "https://grad.example.edu/program")
+
+    assert fields["language"].lower() == "bilingual"
+    assert fields["duration"] == "4 semesters"
+    assert fields["tuition"] == "USD 12,500 annual"
+    assert fields["deadlines"] == "2027/01/05"
+    assert fields["portal"] == "https://grad.example.edu/apply"
+    assert fields["supervisor_required"] == "yes"
+    assert fields["interview_required"] == "yes"
+    assert all(evidence[field]["snippet"] != "not_found" for field in evidence)
+
+
+def test_table_fallback_edge_case_fixture_preserves_date_currency_and_requirement_fields():
+    html = _read_fixture("table_fallback_edge_cases.html")
+    soup = BeautifulSoup(html, "html.parser")
+
+    programs = _extract_with_table_fallback(
+        "Graduate Program details",
+        "https://grad.example.edu/table",
+        _normalize_table_rows(soup),
+    )
+
+    assert len(programs) == 1
+    fields = programs[0]["critical_fields"]
+    assert fields["language"] == "Bilingual"
+    assert fields["duration"] == "4 semesters"
+    assert fields["tuition"] == "USD 12,500 annual"
+    assert fields["deadlines"] == "2027/01/05"
+    assert fields["portal"] == "https://grad.example.edu/apply"
+    assert "Bachelor degree" in fields["requirements"]
 
 
 def test_tsinghua_sigs_connector_prefers_selector_chain_and_emits_connector_metadata():

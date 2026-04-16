@@ -37,22 +37,34 @@ PROGRAM_NAME_VARIANTS: dict[str, str] = {
     "master program in computer science": "MSc Computer Science",
     "m.sc. in computer science": "MSc Computer Science",
     "msc computer science": "MSc Computer Science",
+    "master of science in computer science": "MSc Computer Science",
+    "computer science master program": "MSc Computer Science",
     "master program in data science": "MSc Data Science",
     "m.sc. in data science": "MSc Data Science",
     "msc data science": "MSc Data Science",
+    "master of science in data science": "MSc Data Science",
+    "data science master program": "MSc Data Science",
     "master of engineering in electronic information": "MEng Electronic Information",
+    "m.eng. in electronic information": "MEng Electronic Information",
+    "electronic information master of engineering": "MEng Electronic Information",
     "电子信息工程硕士": "MEng Electronic Information",
     "master program in artificial intelligence": "MSc Artificial Intelligence",
+    "master of science in artificial intelligence": "MSc Artificial Intelligence",
+    "artificial intelligence master program": "MSc Artificial Intelligence",
     "人工智能硕士": "MSc Artificial Intelligence",
 }
 
 DEPARTMENT_NAME_VARIANTS: dict[str, str] = {
     "dept. of computer science": "Department of Computer Science",
+    "department of computer science": "Department of Computer Science",
     "department of computer science and engineering": "Department of Computer Science",
+    "computer science and engineering department": "Department of Computer Science",
     "school of computer science and engineering": "School of Computer Science",
     "school of computer science & engineering": "School of Computer Science",
+    "school of computer and information engineering": "School of Computer Science",
     "计算机科学与工程学院": "School of Computer Science",
     "电子与信息工程学院": "School of Electronic and Information Engineering",
+    "电子信息与电气工程学院": "School of Electronic and Information Engineering",
 }
 
 
@@ -60,6 +72,7 @@ _MONTH_FORMATS = ("%d %b %Y", "%d %B %Y", "%B %d, %Y", "%b %d, %Y", "%Y-%m-%d", 
 _CHINESE_DATE_PATTERNS = (
     r"^\s*(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日\s*$",
     r"^\s*(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\s*$",
+    r"^\s*(\d{4})[-/]\s*(\d{1,2})[-/]\s*(\d{1,2})\s*$",
 )
 
 
@@ -87,6 +100,10 @@ def normalize_date(raw_value: Optional[str]) -> dict[str, Any]:
     if not raw:
         return {"raw": raw_value, "normalized": None, "ambiguous": True}
 
+    compact_range = re.search(r"(\d{4}[./-]\d{1,2}[./-]\d{1,2})\s*(?:to|~|–|-|至)\s*(\d{4}[./-]\d{1,2}[./-]\d{1,2})", raw)
+    if compact_range:
+        return {"raw": raw_value, "normalized": None, "ambiguous": True}
+
     for pattern in _CHINESE_DATE_PATTERNS:
         match = re.match(pattern, raw)
         if match:
@@ -112,6 +129,11 @@ def normalize_tuition(raw_value: Optional[str]) -> dict[str, Any]:
     if not raw:
         return {"raw": raw_value, "normalized": None, "ambiguous": True}
 
+    if re.search(r"\b(?:or|and)\b|至|~|–|-", raw, flags=re.IGNORECASE):
+        numeric_tokens = re.findall(r"\d[\d,]*(?:\.\d+)?", raw)
+        if len(numeric_tokens) > 1:
+            return {"raw": raw_value, "normalized": None, "ambiguous": True}
+
     currency = None
     if re.search(r"\b(?:rmb|cny)\b|¥|元", raw, flags=re.IGNORECASE):
         currency = "CNY"
@@ -123,7 +145,14 @@ def normalize_tuition(raw_value: Optional[str]) -> dict[str, Any]:
     if amount_match:
         amount_value = float(amount_match.group(1).replace(",", ""))
 
-    periodicity = "annual" if re.search(r"per\s*year|/year|annual|每年", raw, flags=re.IGNORECASE) else None
+    if re.search(r"per\s*year|/year|annual|每年|每学年", raw, flags=re.IGNORECASE):
+        periodicity = "annual"
+    elif re.search(r"per\s*semester|/semester|semester|每学期", raw, flags=re.IGNORECASE):
+        periodicity = "semester"
+    elif re.search(r"total|in total|总计", raw, flags=re.IGNORECASE):
+        periodicity = "total"
+    else:
+        periodicity = None
 
     ambiguous = currency is None or amount_value is None
     normalized = None

@@ -43,7 +43,10 @@ def main(send_email: bool = True) -> int:
     # 2 — Scrape all sources
     log.info("Step 1/3 — Scraping sources…")
     try:
-        summary = scraper.run_full_scan(cfg.DB_PATH)
+        summary = scraper.run_full_scan(
+            cfg.DB_PATH,
+            run_metadata={"run_kind": "production", "trigger": "run_weekly.py"},
+        )
         db.log_scan(summary, cfg.DB_PATH)
         log.info(
             "Scraper done: %d new findings / %d total | %d errors",

@@ -264,6 +264,32 @@ Candidato internacional que quiere optimizar admisión + calidad de vida + valor
 ## Fase 5 — Sistema vivo
 - Alertas, recalculado continuo, reportes periódicos.
 
+### Plan táctico de ejecución (3 sprints / 3 semanas)
+
+#### Sprint 1 (Semana 1) — datos y snapshots
+- Extender schema con entidades núcleo del PRD.
+- Completar CRUD base para `University`, `Program`, `Faculty`, `SourceDocument`, `EvidenceSnippet` y `ScoreBreakdown`.
+- Cerrar ciclo de vida de snapshot (`create -> tag entities -> close -> diff`).
+
+**Criterio de salida S1**
+- DB lista con entidades PRD y versionado funcional de snapshots.
+
+#### Sprint 2 (Semana 2) — ingestión oficial Shenzhen
+- Cargar seeds iniciales de universidades objetivo en Shenzhen.
+- Implementar scraping de admisión desde fuentes oficiales.
+- Extraer programas y registrar evidencia (`source_url` + snippet) por campo crítico.
+
+**Criterio de salida S2**
+- Al menos 2 universidades con programas extraídos y evidencia trazable.
+
+#### Sprint 3 (Semana 3) — scoring + decision console
+- Implementar sub-scores explicables (`admission`, `strategic`, `lifestyle`, `contact`, `confidence`).
+- Generar ranking priorizado utilizable para shortlist.
+- Exponer vista de cambios entre snapshots + contactos recomendados.
+
+**Criterio de salida S3**
+- Ranking utilizable con explicación y changelog visible en la consola de decisión.
+
 ---
 
 ## 13) Riesgos y mitigaciones
@@ -287,9 +313,9 @@ Candidato internacional que quiere optimizar admisión + calidad de vida + valor
 - [ ] Base con universidades seed y páginas oficiales registradas.
 - [ ] Al menos un pipeline funcional de extracción de programas.
 - [ ] Tabla de programas con campos críticos completos (idioma, duración, requisitos, deadline).
-- [ ] Score inicial de `admission_fit`, `strategic_fit`, `confidence`.
-- [ ] Changelog de cambios entre snapshots.
-- [ ] Vista de ranking con explicación de score.
+- [x] Score inicial de `admission_fit`, `strategic_fit`, `confidence`.
+- [x] Changelog de cambios entre snapshots.
+- [x] Vista de ranking con explicación de score.
 
 ---
 
@@ -300,6 +326,23 @@ Candidato internacional que quiere optimizar admisión + calidad de vida + valor
 3. No se mezcla dato oficial con inferido sin etiquetado explícito.
 4. Mejor cobertura confiable que cobertura masiva opaca.
 
+---
 
+## 16) Estado de implementación en este repositorio (abril 2026)
+
+### Completado
+- Modelo de datos extendido con entidades núcleo del PRD y tablas de soporte para trazabilidad.
+- Pipeline de discovery/extracción para universidades y programas con seeds configurables.
+- Snapshots por corrida, diff de cambios y auditoría de campos sensibles/inconsistencias.
+- Decision Console en Streamlit con ranking Top-N, variaciones, motivos y recomendación de docentes.
+- Scoring PRD automático por snapshot con persistencia de sub-scores explicables.
+- Política de confianza global para bloqueo de ranking en programas de baja confiabilidad.
+
+### Parcial
+- Hardening de conectores por universidad y observabilidad de calidad por snapshot/fuente.
+
+### Próximos pasos
+- Ver `docs/NEXT_STEPS.md` para roadmap P0/P1/P2.
+- Ver `docs/IMPLEMENTATION_STATUS.md` para mapeo tarea-por-tarea.
 
 > Estado auditado del sistema actual: ver `docs/ESTADO_ACTUAL_SISTEMA.md`.

@@ -1,7 +1,10 @@
 """Vista 6 — Configuración del sistema."""
 
+import json
+import re
 import subprocess, threading, queue, time
 import scraper, analyzer
+import scoring
 
 st.title("⚙️ Configuración")
 
@@ -122,6 +125,179 @@ with tab_profile:
     if st.button("💾 Guardar perfil"):
         cfg.save_user_profile(new_profile)
         st.success("Perfil guardado.")
+
+    st.divider()
+    st.subheader("Perfiles de pesos para ranking (`UserProfile.weights`)")
+    st.caption(
+        "Los pesos se validan con rango [0,1] y suma exacta = 1. "
+        "Si falla, el sistema cae a defaults del PRD."
+    )
+
+    profiles = db.list_user_profiles(cfg.DB_PATH)
+    if not profiles:
+        default_weights = dict(scoring.DEFAULT_WEIGHTS)
+        db.add_user_profile(
+            {
+                "user_key": "default_profile",
+                "display_name": "Perfil Default",
+                "role": "decision_maker",
+                "weights": default_weights,
+                "weights_version": "v1",
+                "is_active": True,
+            },
+            cfg.DB_PATH,
+        )
+        profiles = db.list_user_profiles(cfg.DB_PATH)
+        st.info("Se creó un perfil default para empezar.")
+
+    def _profile_label(profile: dict) -> str:
+        derived = db._json_loads(profile.get("derived_data"))
+        marker = "🟢" if int(derived.get("is_active", 0)) == 1 else "⚪"
+        name = profile.get("display_name") or profile.get("user_key") or f"perfil_{profile['id']}"
+        version = derived.get("weights_version") or "v?"
+        return f"{marker} {name} ({version})"
+
+    profile_options = {p["id"]: p for p in profiles}
+    active_profile = db.get_active_user_profile(cfg.DB_PATH)
+    active_id = active_profile["id"] if active_profile else profiles[0]["id"]
+
+    selected_id = st.selectbox(
+        "Perfil de pesos activo",
+        options=list(profile_options.keys()),
+        index=list(profile_options.keys()).index(active_id),
+        format_func=lambda pid: _profile_label(profile_options[pid]),
+        help="Selecciona qué perfil se usa para calcular `overall_score`.",
+    )
+    if selected_id != active_id:
+        db.set_active_user_profile(selected_id, cfg.DB_PATH)
+        st.success("Perfil activo actualizado.")
+        st.rerun()
+
+    selected_profile = profile_options[selected_id]
+    selected_derived = db._json_loads(selected_profile.get("derived_data"))
+    selected_weights = selected_derived.get("weights") or dict(scoring.DEFAULT_WEIGHTS)
+    valid_weights, validation = scoring.validate_weights(selected_weights)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        profile_name = st.text_input(
+            "Nombre visible",
+            value=selected_profile.get("display_name") or "",
+            key=f"prof_name_{selected_id}",
+        )
+    with c2:
+        profile_key = st.text_input(
+            "User key",
+            value=selected_profile.get("user_key") or "",
+            key=f"prof_key_{selected_id}",
+            help="Identificador único sin espacios (ej: simon_a).",
+        )
+    with c3:
+        profile_role = st.text_input(
+            "Rol",
+            value=selected_profile.get("role") or "",
+            key=f"prof_role_{selected_id}",
+        )
+
+    st.markdown("**Editar pesos**")
+    wc1, wc2, wc3, wc4, wc5 = st.columns(5)
+    edited_weights = {
+        "strategic_fit": wc1.number_input("Strategic", min_value=0.0, max_value=1.0, value=float(selected_weights.get("strategic_fit", 0.30)), step=0.01, key=f"w_s_{selected_id}"),
+        "admission_fit": wc2.number_input("Admission", min_value=0.0, max_value=1.0, value=float(selected_weights.get("admission_fit", 0.25)), step=0.01, key=f"w_a_{selected_id}"),
+        "lifestyle_fit": wc3.number_input("Lifestyle", min_value=0.0, max_value=1.0, value=float(selected_weights.get("lifestyle_fit", 0.20)), step=0.01, key=f"w_l_{selected_id}"),
+        "contact_leverage": wc4.number_input("Contact", min_value=0.0, max_value=1.0, value=float(selected_weights.get("contact_leverage", 0.15)), step=0.01, key=f"w_c_{selected_id}"),
+        "information_confidence": wc5.number_input("Confidence", min_value=0.0, max_value=1.0, value=float(selected_weights.get("information_confidence", 0.10)), step=0.01, key=f"w_i_{selected_id}"),
+    }
+    edited_sum = sum(float(v) for v in edited_weights.values())
+    st.caption(f"Suma actual de pesos: **{edited_sum:.4f}**")
+    if not validation["valid"]:
+        st.warning(
+            f"El perfil guardado tenía pesos inválidos ({validation['reason']}). "
+            "Se aplicará fallback a defaults hasta corregirlo."
+        )
+    else:
+        st.success("Pesos guardados válidos.")
+
+    col_save, col_delete = st.columns([1, 1])
+    with col_save:
+        if st.button("💾 Guardar pesos y perfil", key=f"save_weights_{selected_id}"):
+            if not re.match(r"^[a-zA-Z0-9_\-]+$", profile_key or ""):
+                st.error("`user_key` debe ser alfanumérico (permitido: _ y -).")
+            else:
+                resolved_weights, edit_validation = scoring.validate_weights(edited_weights)
+                old_version = str(selected_derived.get("weights_version") or "v1")
+                match = re.match(r"^v(\d+)$", old_version)
+                old_num = int(match.group(1)) if match else 1
+                new_version = f"v{old_num + 1}"
+                db.update_user_profile(
+                    selected_id,
+                    {
+                        "user_key": profile_key.strip(),
+                        "display_name": profile_name.strip(),
+                        "role": profile_role.strip(),
+                        "weights": resolved_weights,
+                        "weights_version": new_version,
+                        "is_active": True,
+                    },
+                    cfg.DB_PATH,
+                )
+                if edit_validation["valid"]:
+                    st.success(f"Perfil guardado con versión {new_version}.")
+                else:
+                    st.warning(
+                        f"Pesos inválidos ({edit_validation['reason']}). "
+                        f"Se guardó fallback PRD en {new_version}."
+                    )
+                st.rerun()
+    with col_delete:
+        if len(profiles) > 1 and st.button("🗑️ Eliminar perfil", key=f"del_profile_{selected_id}"):
+            db.delete_user_profile(selected_id, cfg.DB_PATH)
+            st.success("Perfil eliminado.")
+            st.rerun()
+
+    with st.expander("➕ Crear nuevo perfil de pesos"):
+        new_name = st.text_input("Nombre", value="Perfil B", key="new_profile_name")
+        new_key = st.text_input("User key nuevo", value="", key="new_profile_key")
+        if st.button("Crear perfil", key="create_profile_btn"):
+            clean_key = (new_key or "").strip()
+            if not re.match(r"^[a-zA-Z0-9_\-]+$", clean_key):
+                st.error("`user_key` inválido. Usa letras, números, `_` o `-`.")
+            elif any(p.get("user_key") == clean_key for p in profiles):
+                st.error("Ese `user_key` ya existe.")
+            else:
+                db.add_user_profile(
+                    {
+                        "user_key": clean_key,
+                        "display_name": new_name.strip() or clean_key,
+                        "role": "decision_maker",
+                        "weights": dict(scoring.DEFAULT_WEIGHTS),
+                        "weights_version": "v1",
+                        "is_active": False,
+                    },
+                    cfg.DB_PATH,
+                )
+                st.success("Perfil creado.")
+                st.rerun()
+
+    st.markdown("**Resumen rápido de perfiles**")
+    rows = []
+    for p in profiles:
+        d = db._json_loads(p.get("derived_data"))
+        weights, wval = scoring.validate_weights(d.get("weights"))
+        rows.append(
+            {
+                "ID": p["id"],
+                "User key": p.get("user_key"),
+                "Nombre": p.get("display_name"),
+                "Activo": "✅" if int(d.get("is_active", 0)) == 1 else "",
+                "Versión": d.get("weights_version") or "v?",
+                "Validación": "OK" if wval["valid"] else f"Fallback ({wval['reason']})",
+                "Weights": json.dumps(weights, ensure_ascii=False),
+            }
+        )
+    if rows:
+        import pandas as pd
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 # ── Tab: Credenciales ─────────────────────────────────────────────────────────

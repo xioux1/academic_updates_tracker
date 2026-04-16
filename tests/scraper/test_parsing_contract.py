@@ -1,0 +1,110 @@
+from pathlib import Path
+
+from bs4 import BeautifulSoup
+
+from scraper import (
+    CRITICAL_FIELD_KEYS,
+    _build_program_contract,
+    _evidence_rows_for_program,
+    _extract_critical_fields_from_text,
+    _extract_with_regex,
+    _extract_with_table_fallback,
+    _normalize_table_rows,
+)
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _read_fixture(name: str) -> str:
+    return (FIXTURES / name).read_text(encoding="utf-8")
+
+
+def test_extract_critical_fields_sustech_fixture():
+    text = _read_fixture("sustech_program.txt")
+
+    fields, evidence = _extract_critical_fields_from_text(text, "https://www.sustech.edu.cn/program")
+
+    assert fields["language"].lower() == "english"
+    assert fields["duration"].lower() == "2 years"
+    assert fields["tuition"].lower().startswith("rmb 80,000")
+    assert "bachelor degree" in fields["requirements"].lower()
+    assert fields["deadlines"] == "2026-12-15"
+    assert fields["portal"] == "https://apply.sustech.edu.cn/graduate"
+    assert fields["supervisor_required"] == "yes"
+    assert fields["interview_required"] == "yes"
+    for field in ("language", "duration", "tuition", "requirements", "deadlines", "portal"):
+        assert evidence[field]["snippet"] != "not_found"
+
+
+def test_extract_critical_fields_hitsz_fixture_alternative_formats():
+    text = _read_fixture("hitsz_program.txt")
+
+    fields, _ = _extract_critical_fields_from_text(text, "https://www.hitsz.edu.cn/admissions")
+
+    assert fields["language"].lower() == "chinese"
+    assert fields["duration"] == "3 年"
+    assert fields["tuition"].startswith("¥45,000")
+    assert fields["deadlines"] == "15 Jan 2027"
+    assert fields["supervisor_required"] == "yes"
+
+
+def test_table_fallback_extracts_currency_and_date_regression_cases():
+    html = _read_fixture("sustech_table.html")
+    soup = BeautifulSoup(html, "html.parser")
+
+    rows = _normalize_table_rows(soup)
+    programs = _extract_with_table_fallback(
+        "Graduate Program details",
+        "https://www.sustech.edu.cn/table",
+        rows,
+    )
+
+    assert len(programs) == 1
+    fields = programs[0]["critical_fields"]
+    assert fields["language"] == "English"
+    assert fields["duration"] == "2 years"
+    assert fields["tuition"] == "USD 12,500 /year"
+    assert fields["deadlines"] == "January 5, 2027"
+
+
+def test_contract_has_evidence_for_all_critical_fields():
+    text = _read_fixture("sustech_program.txt")
+    programs = _extract_with_regex(text, "https://www.sustech.edu.cn/program")
+
+    assert len(programs) == 1
+    program = programs[0]
+
+    assert sorted(program["evidence_by_field"].keys()) == sorted(CRITICAL_FIELD_KEYS)
+
+
+
+def test_evidence_rows_contract_maps_all_critical_fields_to_evidence_snippets_rows():
+    program_contract = _build_program_contract(
+        source_url="https://www.example.edu/program",
+        program_name="Master Program in Data Science",
+        critical_fields={
+            "language": "English",
+            "duration": "2 years",
+            "tuition": "USD 12,500 /year",
+            "requirements": "Bachelor degree",
+            "deadlines": "January 5, 2027",
+            "portal": "https://apply.example.edu",
+            "supervisor_required": "yes",
+            "interview_required": "no",
+        },
+        evidence={
+            "language": {"snippet": "Language: English", "url": "https://www.example.edu/program", "locator": "regex_match"},
+        },
+    )[0]
+
+    rows = _evidence_rows_for_program(
+        program_contract,
+        source_document_id=9,
+        entity_type="program",
+        entity_id=10,
+    )
+
+    assert len(rows) == len(CRITICAL_FIELD_KEYS)
+    assert {row["field_name"] for row in rows} == set(CRITICAL_FIELD_KEYS)
+    assert all(row["source_document_id"] == 9 for row in rows)
+    assert all(row["entity_id"] == 10 for row in rows)

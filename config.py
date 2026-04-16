@@ -4,6 +4,7 @@ All secrets are read from env vars; no hard-coded credentials.
 """
 
 import os
+import json
 from dataclasses import dataclass, field
 
 
@@ -41,8 +42,54 @@ ARXIV_MAX_RESULTS: int = int(os.environ.get("ARXIV_MAX_RESULTS", "30"))
 SCHOLAR_MAX_RESULTS: int = int(os.environ.get("SCHOLAR_MAX_RESULTS", "10"))
 DAYS_LOOKBACK: int = int(os.environ.get("DAYS_LOOKBACK", "30"))
 
+# ---------------------------------------------------------------------------
+# Backfill operations
+# ---------------------------------------------------------------------------
+
+# Ventana histórica por defecto para corridas de backfill.
+BACKFILL_WINDOW_WEEKS: int = int(os.environ.get("BACKFILL_WINDOW_WEEKS", "6"))
+
+# Frecuencia objetivo por fuente para backfill (semanas entre corridas).
+# 1 = semanal, 2 = quincenal, 4 = mensual aproximado.
+BACKFILL_SOURCE_FREQUENCIES: dict[str, int] = {
+    "google_scholar": int(os.environ.get("BACKFILL_FREQ_GOOGLE_SCHOLAR", "1")),
+    "arxiv": int(os.environ.get("BACKFILL_FREQ_ARXIV", "1")),
+    "github": int(os.environ.get("BACKFILL_FREQ_GITHUB", "2")),
+    "cnki": int(os.environ.get("BACKFILL_FREQ_CNKI", "2")),
+    "baidu_scholar": int(os.environ.get("BACKFILL_FREQ_BAIDU_SCHOLAR", "2")),
+    "rss": int(os.environ.get("BACKFILL_FREQ_RSS", "1")),
+    "university": int(os.environ.get("BACKFILL_FREQ_UNIVERSITY", "1")),
+}
+
+# Umbral mínimo de calidad de extracción para continuar backfill.
+BACKFILL_MIN_QUALITY_RATIO: float = float(os.environ.get("BACKFILL_MIN_QUALITY_RATIO", "0.55"))
+
+# University scraping seed (editable via env as JSON list)
+UNIVERSITY_SOURCE_SEEDS: list[dict] = json.loads(
+    os.environ.get(
+        "UNIVERSITY_SOURCE_SEEDS",
+        json.dumps([
+            {"name": "SUSTech", "base_urls": ["https://www.sustech.edu.cn/en/"]},
+            {"name": "Harbin Institute of Technology, Shenzhen", "base_urls": ["https://www.hitsz.edu.cn/indexen.html"]},
+            {"name": "Shenzhen University", "base_urls": ["https://www.szu.edu.cn/en/"]},
+        ]),
+    )
+)
+
 # arXiv categories of interest
 ARXIV_CATEGORIES: list[str] = ["cs.RO", "cs.SY", "eess.SY", "cs.AI", "eess.SP"]
+
+# ---------------------------------------------------------------------------
+# Ranking guardrails
+# ---------------------------------------------------------------------------
+
+# Programas por debajo de este umbral de confianza no son rankeables por defecto.
+MIN_CONFIDENCE_TO_RANK: float = float(os.environ.get("MIN_CONFIDENCE_TO_RANK", "0.35"))
+
+
+def get_min_confidence_to_rank() -> float:
+    """Return the normalized confidence threshold used to allow program ranking."""
+    return max(0.0, min(1.0, float(MIN_CONFIDENCE_TO_RANK)))
 
 # Browser-like headers for Chinese sources
 BROWSER_HEADERS: dict = {

@@ -254,8 +254,12 @@ CREATE TABLE IF NOT EXISTS score_breakdowns (
     entity_type      TEXT NOT NULL,
     entity_id        INTEGER NOT NULL,
     score_name       TEXT NOT NULL,
+    snapshot_id      INTEGER,
+    score_value      REAL,
     total_score      REAL,
     components       TEXT NOT NULL DEFAULT '{}',
+    explanation      TEXT,
+    confidence_score REAL,
     computed_at      TEXT NOT NULL
 );
 
@@ -286,6 +290,9 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_created_at
 
 CREATE INDEX IF NOT EXISTS idx_snapshot_entities_snapshot
     ON snapshot_entities(snapshot_id, entity_type, entity_id);
+
+CREATE INDEX IF NOT EXISTS idx_score_breakdowns_lookup
+    ON score_breakdowns(entity_type, entity_id, score_name, snapshot_id, computed_at);
 """
 
 SEED_PROFESSORS = [
@@ -385,6 +392,10 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "source_documents", "source_priority", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "source_documents", "content_hash", "TEXT")
         _ensure_column(conn, "programs", "inconsistency_flag", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "score_breakdowns", "snapshot_id", "INTEGER")
+        _ensure_column(conn, "score_breakdowns", "score_value", "REAL")
+        _ensure_column(conn, "score_breakdowns", "explanation", "TEXT")
+        _ensure_column(conn, "score_breakdowns", "confidence_score", "REAL")
         conn.commit()
 
         # Only seed if tables are empty
@@ -490,6 +501,86 @@ def close_snapshot(snapshot_id: int, db_path: str = DB_PATH) -> None:
             (now_iso(), snapshot_id),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def update_snapshot_summary(snapshot_id: int, summary: dict, db_path: str = DB_PATH) -> None:
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            """UPDATE scan_snapshots
+               SET summary_json=?
+               WHERE id=?""",
+            (_json_blob(summary), snapshot_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def upsert_score_breakdown(
+    *,
+    entity_type: str,
+    entity_id: int,
+    score_name: str,
+    snapshot_id: Optional[int],
+    score_value: float,
+    components: Optional[dict],
+    explanation: str,
+    confidence_score: Optional[float],
+    db_path: str = DB_PATH,
+) -> int:
+    """
+    Idempotent write helper for score_breakdowns.
+    Uniqueness key (logical): entity_type, entity_id, score_name, snapshot_id.
+    """
+    ts = now_iso()
+    conn = get_connection(db_path)
+    try:
+        existing = conn.execute(
+            """SELECT id FROM score_breakdowns
+               WHERE entity_type=? AND entity_id=? AND score_name=?
+                 AND ((snapshot_id IS NULL AND ? IS NULL) OR snapshot_id=?)
+               ORDER BY id DESC
+               LIMIT 1""",
+            (entity_type, entity_id, score_name, snapshot_id, snapshot_id),
+        ).fetchone()
+
+        payload = (
+            snapshot_id,
+            score_value,
+            score_value,  # backward-compatible column read by existing views
+            _json_blob(components),
+            explanation,
+            confidence_score,
+            ts,
+        )
+        if existing:
+            conn.execute(
+                """UPDATE score_breakdowns
+                   SET snapshot_id=?, score_value=?, total_score=?, components=?,
+                       explanation=?, confidence_score=?, computed_at=?
+                   WHERE id=?""",
+                (*payload, existing["id"]),
+            )
+            conn.commit()
+            return existing["id"]
+
+        cur = conn.execute(
+            """INSERT INTO score_breakdowns
+               (entity_type, entity_id, score_name, snapshot_id, score_value, total_score,
+                components, explanation, confidence_score, computed_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                entity_type,
+                entity_id,
+                score_name,
+                *payload,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
     finally:
         conn.close()
 

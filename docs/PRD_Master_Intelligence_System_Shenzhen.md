@@ -325,3 +325,20 @@ Candidato internacional que quiere optimizar admisión + calidad de vida + valor
 2. No hay inferencia sin evidencia.
 3. No se mezcla dato oficial con inferido sin etiquetado explícito.
 4. Mejor cobertura confiable que cobertura masiva opaca.
+
+---
+
+## 16) Estado de implementación en este repositorio (abril 2026)
+
+### Completado
+- Modelo de datos extendido con entidades núcleo del PRD y tablas de soporte para trazabilidad.
+- Pipeline de discovery/extracción para universidades y programas con seeds configurables.
+- Snapshots por corrida, diff de cambios y auditoría de campos sensibles/inconsistencias.
+- Decision Console en Streamlit con ranking Top-N, variaciones, motivos y recomendación de docentes.
+
+### Parcial
+- Scoring framework PRD: la infraestructura de persistencia/consumo existe, pero falta consolidar job automático de cálculo completo de sub-scores por snapshot.
+
+### Próximos pasos
+- Ver `docs/NEXT_STEPS.md` para roadmap P0/P1/P2.
+- Ver `docs/IMPLEMENTATION_STATUS.md` para mapeo tarea-por-tarea.

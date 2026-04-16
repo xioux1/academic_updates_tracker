@@ -15,15 +15,22 @@ LANGUAGE_TAXONOMY = {"en", "zh", "bilingual", "unknown"}
 _LANGUAGE_VARIANTS: dict[str, str] = {
     "english": "en",
     "en": "en",
+    "英语": "en",
     "chinese": "zh",
     "zh": "zh",
     "中文": "zh",
     "汉语": "zh",
+    "中文授课": "zh",
     "bilingual": "bilingual",
     "english/chinese": "bilingual",
     "chinese/english": "bilingual",
+    "english / chinese": "bilingual",
+    "chinese / english": "bilingual",
+    "english and chinese": "bilingual",
+    "chinese and english": "bilingual",
     "中英": "bilingual",
     "中英双语": "bilingual",
+    "双语": "bilingual",
 }
 
 PROGRAM_NAME_VARIANTS: dict[str, str] = {
@@ -33,21 +40,41 @@ PROGRAM_NAME_VARIANTS: dict[str, str] = {
     "master program in data science": "MSc Data Science",
     "m.sc. in data science": "MSc Data Science",
     "msc data science": "MSc Data Science",
+    "master of engineering in electronic information": "MEng Electronic Information",
+    "电子信息工程硕士": "MEng Electronic Information",
+    "master program in artificial intelligence": "MSc Artificial Intelligence",
+    "人工智能硕士": "MSc Artificial Intelligence",
 }
 
 DEPARTMENT_NAME_VARIANTS: dict[str, str] = {
     "dept. of computer science": "Department of Computer Science",
     "department of computer science and engineering": "Department of Computer Science",
     "school of computer science and engineering": "School of Computer Science",
+    "school of computer science & engineering": "School of Computer Science",
+    "计算机科学与工程学院": "School of Computer Science",
+    "电子与信息工程学院": "School of Electronic and Information Engineering",
 }
 
 
 _MONTH_FORMATS = ("%d %b %Y", "%d %B %Y", "%B %d, %Y", "%b %d, %Y", "%Y-%m-%d", "%Y/%m/%d")
+_CHINESE_DATE_PATTERNS = (
+    r"^\s*(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日\s*$",
+    r"^\s*(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\s*$",
+)
+
+
+def _normalize_lookup_key(raw_value: Optional[str]) -> str:
+    raw = (raw_value or "").strip().lower()
+    if not raw:
+        return ""
+    key = re.sub(r"[()（）\[\]【】,，;；]+", " ", raw)
+    key = key.replace("&", " and ").replace("/", " / ")
+    return re.sub(r"\s+", " ", key).strip()
 
 
 def normalize_language(raw_value: Optional[str]) -> dict[str, Any]:
     raw = (raw_value or "").strip()
-    key = raw.lower()
+    key = _normalize_lookup_key(raw)
     normalized = _LANGUAGE_VARIANTS.get(key)
     ambiguous = normalized is None
     if not normalized:
@@ -59,6 +86,12 @@ def normalize_date(raw_value: Optional[str]) -> dict[str, Any]:
     raw = (raw_value or "").strip()
     if not raw:
         return {"raw": raw_value, "normalized": None, "ambiguous": True}
+
+    for pattern in _CHINESE_DATE_PATTERNS:
+        match = re.match(pattern, raw)
+        if match:
+            year, month, day = (int(v) for v in match.groups())
+            return {"raw": raw_value, "normalized": f"{year:04d}-{month:02d}-{day:02d}", "ambiguous": False}
 
     for fmt in _MONTH_FORMATS:
         try:
@@ -90,7 +123,7 @@ def normalize_tuition(raw_value: Optional[str]) -> dict[str, Any]:
     if amount_match:
         amount_value = float(amount_match.group(1).replace(",", ""))
 
-    periodicity = "annual" if re.search(r"per\s*year|/year|annual", raw, flags=re.IGNORECASE) else None
+    periodicity = "annual" if re.search(r"per\s*year|/year|annual|每年", raw, flags=re.IGNORECASE) else None
 
     ambiguous = currency is None or amount_value is None
     normalized = None
@@ -105,7 +138,7 @@ def normalize_tuition(raw_value: Optional[str]) -> dict[str, Any]:
 
 def _normalize_variant(raw_name: Optional[str], mapping: dict[str, str]) -> dict[str, Any]:
     raw = (raw_name or "").strip()
-    key = raw.lower()
+    key = _normalize_lookup_key(raw)
     normalized = mapping.get(key, raw if raw else None)
     ambiguous = bool(raw) and key not in mapping
     return {"raw": raw_name, "normalized": normalized, "ambiguous": ambiguous}

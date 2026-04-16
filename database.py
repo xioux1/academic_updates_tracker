@@ -182,6 +182,8 @@ CREATE TABLE IF NOT EXISTS source_documents (
     source_name      TEXT,
     source_url       TEXT NOT NULL,
     checksum         TEXT,
+    source_priority  INTEGER NOT NULL DEFAULT 0,
+    content_hash     TEXT,
     official_data    TEXT NOT NULL DEFAULT '{}',
     derived_data     TEXT NOT NULL DEFAULT '{}',
     inferred_data    TEXT NOT NULL DEFAULT '{}',
@@ -352,6 +354,9 @@ def init_db(db_path: str = DB_PATH) -> None:
     conn = get_connection(db_path)
     try:
         conn.executescript(SCHEMA_SQL)
+        # Lightweight forward-compatible migrations for existing DB files.
+        _ensure_column(conn, "source_documents", "source_priority", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "source_documents", "content_hash", "TEXT")
         conn.commit()
 
         # Only seed if tables are empty
@@ -363,6 +368,18 @@ def init_db(db_path: str = DB_PATH) -> None:
             conn.commit()
     finally:
         conn.close()
+
+
+def _ensure_column(
+    conn: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    column_sql: str,
+) -> None:
+    columns = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    existing = {c["name"] for c in columns}
+    if column_name not in existing:
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
 
 
 def _seed_professors(conn: sqlite3.Connection) -> None:

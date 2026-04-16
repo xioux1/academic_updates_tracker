@@ -4,6 +4,7 @@ All secrets are read from env vars; no hard-coded credentials.
 """
 
 import os
+import json
 from dataclasses import dataclass, field
 
 
@@ -40,6 +41,18 @@ SCRAPER_DELAY_SECONDS: float = float(os.environ.get("SCRAPER_DELAY", "2.0"))
 ARXIV_MAX_RESULTS: int = int(os.environ.get("ARXIV_MAX_RESULTS", "30"))
 SCHOLAR_MAX_RESULTS: int = int(os.environ.get("SCHOLAR_MAX_RESULTS", "10"))
 DAYS_LOOKBACK: int = int(os.environ.get("DAYS_LOOKBACK", "30"))
+
+# University scraping seed (editable via env as JSON list)
+UNIVERSITY_SOURCE_SEEDS: list[dict] = json.loads(
+    os.environ.get(
+        "UNIVERSITY_SOURCE_SEEDS",
+        json.dumps([
+            {"name": "SUSTech", "base_urls": ["https://www.sustech.edu.cn/en/"]},
+            {"name": "Harbin Institute of Technology, Shenzhen", "base_urls": ["https://www.hitsz.edu.cn/indexen.html"]},
+            {"name": "Shenzhen University", "base_urls": ["https://www.szu.edu.cn/en/"]},
+        ]),
+    )
+)
 
 # arXiv categories of interest
 ARXIV_CATEGORIES: list[str] = ["cs.RO", "cs.SY", "eess.SY", "cs.AI", "eess.SP"]

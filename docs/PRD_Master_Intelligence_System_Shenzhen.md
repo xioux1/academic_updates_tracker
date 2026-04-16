@@ -339,7 +339,10 @@ Candidato internacional que quiere optimizar admisión + calidad de vida + valor
 - Política de confianza global para bloqueo de ranking en programas de baja confiabilidad.
 
 ### Parcial
-- Hardening de conectores por universidad y observabilidad de calidad por snapshot/fuente.
+- Observabilidad de calidad agregada por snapshot/fuente en dashboard.
+
+### Completado recientemente
+- Hardening de conectores por universidad en dominios prioritarios Shenzhen, con perfiles dedicados, fallback selector → tabla → regex, retry por dominio y metadatos técnicos de troubleshooting.
 
 ### Próximos pasos
 - Ver `docs/NEXT_STEPS.md` para roadmap P0/P1/P2.

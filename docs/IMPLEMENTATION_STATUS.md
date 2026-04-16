@@ -5,7 +5,7 @@ Este documento resume qué partes del PRD ya están implementadas en el reposito
 ## Resumen ejecutivo
 
 - **Completado**: las 6 tareas iniciales del plan de arranque **y el cierre de P0 de scoring PRD**.
-- **Parcial**: hardening de conectores por universidad (SUSTech/HITSZ/SZU con perfiles dedicados) y observabilidad persistente.
+- **Completado**: hardening de conectores por universidad en dominios prioritarios Shenzhen (SUSTech/HITSZ/SZU + SIGS Tsinghua + PKU Shenzhen Graduate School), incluyendo fallback chain y retry por dominio.
 - **En progreso (P1-3)**: normalización EN/ZH reforzada (idioma/fecha/moneda + variantes de programa/departamento).
 - **Pendiente**: escalado operativo (alertas, métricas avanzadas, calidad por fuente en dashboard).
 
@@ -68,9 +68,8 @@ Se consolida con documentación operativa en:
 ## Riesgos actuales
 
 1. **Cobertura variable por universidad**: depende de estructura HTML y calidad de páginas oficiales.
-2. **Conectores aún genéricos en algunos dominios**: faltan selectores dedicados para más universidades.
-3. **Observabilidad limitada**: hay logs, pero faltan métricas persistentes de extracción/calidad por fuente.
+2. **Observabilidad limitada**: hay logs y metadatos por conector, pero faltan métricas agregadas persistentes de extracción/calidad por fuente.
 
 ## Decisión recomendada
 
-Priorizar P1 de `docs/NEXT_STEPS.md` antes de ampliar fuerte la cobertura de nuevas universidades, para asegurar estabilidad y calidad sostenida.
+Mantener foco en panel de calidad/observabilidad agregada y operación continua de conectores ya hardenizados antes de ampliar cobertura a nuevas regiones.

@@ -18,9 +18,11 @@ import logging
 import re
 import json
 import traceback
+import hashlib
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Generator, Optional
-from urllib.parse import quote_plus, urlencode
+from urllib.parse import quote_plus, urlencode, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -36,6 +38,7 @@ from config import (
     SCHOLAR_MAX_RESULTS,
     DAYS_LOOKBACK,
     SCRAPER_DELAY_SECONDS,
+    UNIVERSITY_SOURCE_SEEDS,
 )
 
 log = logging.getLogger(__name__)
@@ -65,6 +68,294 @@ def _get(url: str, headers: Optional[dict] = None, timeout: int = 15) -> Optiona
 
 def _cutoff_date() -> datetime:
     return datetime.now(timezone.utc) - timedelta(days=DAYS_LOOKBACK)
+
+
+def _normalize_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _content_hash(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def _upsert_source_document(
+    conn: sqlite3.Connection,
+    entity_type: str,
+    entity_id: int,
+    source_name: str,
+    source_url: str,
+    content_text: str,
+    source_priority: int,
+) -> int:
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    content_hash = _content_hash(content_text)
+    row = conn.execute(
+        """SELECT id FROM source_documents
+           WHERE entity_type=? AND entity_id=? AND source_url=?
+           ORDER BY id DESC LIMIT 1""",
+        (entity_type, entity_id, source_url),
+    ).fetchone()
+    if row:
+        conn.execute(
+            """UPDATE source_documents
+               SET source_name=?, checksum=?, source_priority=?, content_hash=?,
+                   official_data=?, fetched_at=?
+               WHERE id=?""",
+            (
+                source_name,
+                content_hash,
+                source_priority,
+                content_hash,
+                json.dumps({"content_preview": content_text[:500]}, ensure_ascii=False),
+                ts,
+                row["id"],
+            ),
+        )
+        return row["id"]
+
+    cur = conn.execute(
+        """INSERT INTO source_documents
+           (entity_type, entity_id, source_name, source_url, checksum,
+            source_priority, content_hash, official_data, fetched_at, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (
+            entity_type,
+            entity_id,
+            source_name,
+            source_url,
+            content_hash,
+            source_priority,
+            content_hash,
+            json.dumps({"content_preview": content_text[:500]}, ensure_ascii=False),
+            ts,
+            ts,
+        ),
+    )
+    return cur.lastrowid
+
+
+def _insert_evidence_snippet(
+    conn: sqlite3.Connection,
+    source_document_id: int,
+    entity_type: str,
+    entity_id: int,
+    field_name: str,
+    snippet_text: str,
+    source_url: str,
+    locator: str,
+) -> None:
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        """INSERT INTO evidence_snippets
+           (source_document_id, entity_type, entity_id, snippet_text, locator,
+            confidence_score, official_data, created_at)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (
+            source_document_id,
+            entity_type,
+            entity_id,
+            snippet_text[:1000],
+            json.dumps({"url": source_url, "selector_or_location": locator}, ensure_ascii=False),
+            0.8,
+            json.dumps({"field": field_name}, ensure_ascii=False),
+            ts,
+        ),
+    )
+
+
+def discover_university_sources(seed_list: Optional[list[dict]] = None) -> list[dict]:
+    """
+    Discover likely admissions/program pages from configured university seeds.
+    """
+    seeds = seed_list or UNIVERSITY_SOURCE_SEEDS
+    discovered: list[dict] = []
+    keyword_hints = ("admission", "admissions", "graduate", "master", "program", "apply", "international")
+
+    for seed in seeds:
+        name = seed.get("name", "Unknown University")
+        base_urls = seed.get("base_urls", [])
+        links: set[str] = set(base_urls)
+        for base_url in base_urls:
+            resp = _get(base_url)
+            if not resp:
+                continue
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for anchor in soup.select("a[href]"):
+                href = anchor.get("href", "")
+                full_url = urljoin(base_url, href)
+                lower = full_url.lower()
+                if any(k in lower for k in keyword_hints):
+                    if urlparse(full_url).netloc == urlparse(base_url).netloc:
+                        links.add(full_url)
+            _sleep(0.4)
+
+        discovered.append(
+            {
+                "name": name,
+                "base_urls": base_urls,
+                "candidate_urls": sorted(links),
+            }
+        )
+
+    return discovered
+
+
+def extract_programs_from_admission_pages(
+    page_text: str,
+    source_url: str,
+) -> list[dict]:
+    """
+    Extract program-level critical fields from admissions text.
+    """
+    normalized = _normalize_whitespace(page_text)
+    if not normalized:
+        return []
+
+    specs: dict[str, tuple[str, str]] = {
+        "idioma": (r"(language of instruction|teaching language|语言).*?(english|chinese|bilingual)", "language"),
+        "duración": (r"(duration|length of study|学制).*?(\d+\s*(?:year|years|semester|semesters|年))", "duration"),
+        "tuition": (r"(tuition|fee|学费).*?((?:rmb|cny|\$|usd)?\s?\d[\d,\.]*)", "tuition"),
+        "requisitos": (r"(requirements?|eligibility|admission criteria|申请条件)\s*[:：]?\s*([^.;]{10,220})", "requirements"),
+        "deadlines": (r"(deadline|application due|截止日期)\s*[:：]?\s*([^.;]{3,120})", "deadlines"),
+        "portal": (r"(apply|application portal|online application|申请系统).*?(https?://[^\s)]+)", "portal"),
+        "supervisor_required": (r"(supervisor|advisor|导师).{0,60}(required|must|必要|需要)", "supervisor_required"),
+        "interview_required": (r"(interview|面试).{0,60}(required|must|必要|需要)", "interview_required"),
+    }
+
+    extracted: dict[str, Optional[str]] = {
+        "language": None,
+        "duration": None,
+        "tuition": None,
+        "requirements": None,
+        "deadlines": None,
+        "portal": None,
+        "supervisor_required": "no",
+        "interview_required": "no",
+    }
+    evidences: dict[str, dict] = {}
+
+    for _, (pattern, field_key) in specs.items():
+        m = re.search(pattern, normalized, flags=re.IGNORECASE)
+        if not m:
+            continue
+        snippet = _normalize_whitespace(m.group(0))
+        value = _normalize_whitespace(m.group(m.lastindex or 0))
+        if field_key in ("supervisor_required", "interview_required"):
+            value = "yes"
+        extracted[field_key] = value
+        evidences[field_key] = {
+            "snippet": snippet,
+            "url": source_url,
+            "locator": "regex_match",
+        }
+
+    if not any(v for k, v in extracted.items() if k not in ("supervisor_required", "interview_required")):
+        return []
+
+    title_match = re.search(
+        r"(Master(?:'s)?\s+Program[^.]{0,120}|Graduate Program[^.]{0,120}|硕士[^。]{0,120})",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    program_name = _normalize_whitespace(title_match.group(0)) if title_match else f"Program from {urlparse(source_url).netloc}"
+
+    return [
+        {
+            "name": program_name[:200],
+            "degree_level": "master",
+            "delivery_mode": None,
+            "status": "active",
+            "critical_fields": extracted,
+            "evidence": evidences,
+            "source_url": source_url,
+        }
+    ]
+
+
+def scrape_university_pages(university: dict, db_path: Optional[str] = None) -> dict:
+    """
+    Scrape university candidate pages, persist source_documents/evidence, and create programs.
+    """
+    import database as db
+
+    if db_path is None:
+        from config import DB_PATH
+        db_path = DB_PATH
+
+    conn = db.get_connection(db_path)
+    created_programs = 0
+    processed_urls = 0
+
+    try:
+        uni_name = university["name"]
+        base_url = (university.get("base_urls") or [None])[0]
+        existing_uni = None
+        for row in db.get_universities(db_path):
+            if row["name"].lower() == uni_name.lower():
+                existing_uni = row
+                break
+        if not existing_uni:
+            uni_id = db.add_university(
+                {"name": uni_name, "slug": re.sub(r"[^a-z0-9]+", "-", uni_name.lower()).strip("-"), "website": base_url},
+                db_path,
+            )
+        else:
+            uni_id = existing_uni["id"]
+
+        for idx, url in enumerate(university.get("candidate_urls", []), start=1):
+            resp = _get(url, timeout=20)
+            if not resp:
+                continue
+            soup = BeautifulSoup(resp.text, "html.parser")
+            page_text = _normalize_whitespace(soup.get_text(" ", strip=True))
+            if not page_text:
+                continue
+
+            processed_urls += 1
+            source_doc_id = _upsert_source_document(
+                conn=conn,
+                entity_type="university",
+                entity_id=uni_id,
+                source_name=uni_name,
+                source_url=url,
+                content_text=page_text,
+                source_priority=max(1, 100 - idx),
+            )
+            programs = extract_programs_from_admission_pages(page_text, url)
+            for program in programs:
+                p_data = {
+                    "university_id": uni_id,
+                    "name": program["name"],
+                    "degree_level": program["degree_level"],
+                    "delivery_mode": program["delivery_mode"],
+                    "status": program["status"],
+                    "official_data": program["critical_fields"],
+                    "derived_data": {"source_url": url},
+                }
+                try:
+                    program_id = db.add_program(p_data, db_path)
+                    created_programs += 1
+                except Exception:
+                    # Skip duplicates due to UNIQUE constraints.
+                    continue
+
+                for field_name, ev in program["evidence"].items():
+                    _insert_evidence_snippet(
+                        conn=conn,
+                        source_document_id=source_doc_id,
+                        entity_type="program",
+                        entity_id=program_id,
+                        field_name=field_name,
+                        snippet_text=ev["snippet"],
+                        source_url=ev["url"],
+                        locator=ev["locator"],
+                    )
+            _sleep(0.4)
+
+        conn.commit()
+        return {"university": uni_name, "processed_urls": processed_urls, "programs_created": created_programs}
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

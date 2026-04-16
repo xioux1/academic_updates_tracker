@@ -9,13 +9,15 @@ Este roadmap prioriza cerrar brechas del PRD sin perder velocidad de entrega.
 
 ## P1 (2-4 semanas) — Calidad de datos y operaciones
 
-### 1) Hardening de extracción oficial por universidad
-- Añadir conectores específicos por universidad (selectores/patrones dedicados).
-- Tests unitarios de parsing con fixtures HTML reales.
-- Backoff/retry por dominio para disminuir fallos intermitentes.
+### 1) Hardening de extracción oficial por universidad (✅ completado en conectores prioritarios)
+- Se añadieron perfiles por dominio/universidad para: **SUSTech, HITSZ, SZU, SIGS Tsinghua y PKU Shenzhen Graduate School**.
+- Se dejó activa cadena de fallback por dominio: **selector-first → table parsing → regex**.
+- Se incorporaron políticas de retry/backoff por dominio para reducir fallos intermitentes.
+- Se persisten metadatos técnicos de conector (`selectors_used`, `connector_version`, `normalizer_used`) para troubleshooting.
+- Tests unitarios de parsing con fixtures HTML por dominio objetivo.
 
 **Definition of Done**
-- Tasa de éxito estable por universidad objetivo.
+- ✅ Tasa de éxito estable por universidad objetivo (conectores prioritarios Shenzhen).
 
 ### 2) Panel de calidad de datos
 - Métricas por snapshot: cobertura de programas, freshness, inconsistencias, campos nulos.

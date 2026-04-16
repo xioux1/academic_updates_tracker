@@ -1435,6 +1435,75 @@ def get_scan_history(db_path: str = DB_PATH, limit: int = 20) -> list[dict]:
         conn.close()
 
 
+def get_operational_metrics(db_path: str = DB_PATH, limit: int = 8) -> dict:
+    """
+    Returns latest snapshot operational metrics and week-vs-week comparison.
+    """
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, started_at, closed_at, summary_json
+            FROM scan_snapshots
+            WHERE status='closed'
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        snapshots = [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+    for item in snapshots:
+        item["summary"] = _json_loads(item.get("summary_json"))
+
+    latest = snapshots[0] if snapshots else None
+    week_ago = snapshots[1] if len(snapshots) > 1 else None
+    if latest and latest.get("closed_at"):
+        try:
+            latest_dt = datetime.strptime(latest["closed_at"], "%Y-%m-%d %H:%M:%S")
+            target = latest_dt.timestamp() - 7 * 24 * 3600
+            for candidate in snapshots[1:]:
+                closed_at = candidate.get("closed_at")
+                if not closed_at:
+                    continue
+                candidate_dt = datetime.strptime(closed_at, "%Y-%m-%d %H:%M:%S")
+                if candidate_dt.timestamp() <= target:
+                    week_ago = candidate
+                    break
+        except ValueError:
+            pass
+
+    def _metric(snapshot: Optional[dict], key_path: tuple[str, ...], default: float = 0.0) -> float:
+        if not snapshot:
+            return default
+        payload = snapshot.get("summary") or {}
+        node: object = payload
+        for k in key_path:
+            if not isinstance(node, dict):
+                return default
+            node = node.get(k)
+        try:
+            return float(node)
+        except (TypeError, ValueError):
+            return default
+
+    comparison = {
+        "coverage_delta": _metric(latest, ("metrics", "coverage", "ratio")) - _metric(week_ago, ("metrics", "coverage", "ratio")),
+        "freshness_delta": _metric(latest, ("metrics", "freshness", "ratio")) - _metric(week_ago, ("metrics", "freshness", "ratio")),
+        "inconsistency_delta": _metric(latest, ("metrics", "inconsistencies", "count")) - _metric(week_ago, ("metrics", "inconsistencies", "count")),
+        "critical_nulls_delta": _metric(latest, ("metrics", "critical_nulls", "count")) - _metric(week_ago, ("metrics", "critical_nulls", "count")),
+    }
+
+    return {
+        "latest": latest,
+        "week_ago": week_ago,
+        "comparison": comparison,
+        "history": snapshots,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Stats helpers used by the dashboard
 # ---------------------------------------------------------------------------

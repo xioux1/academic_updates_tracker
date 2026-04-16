@@ -49,6 +49,78 @@ with col_right:
             btnc2.link_button("Abrir", f["url"])
 
 st.divider()
+st.subheader("🛟 Vista operativa (P0)")
+ops = db.get_operational_metrics(cfg.DB_PATH, limit=12)
+latest = ops.get("latest") or {}
+latest_summary = latest.get("summary") or {}
+latest_metrics = latest_summary.get("metrics", {})
+comparison = ops.get("comparison", {})
+
+p0_status = (latest_summary.get("p0_status") or "yellow").lower()
+if p0_status == "green":
+    p0_label = "🟢 Verde"
+elif p0_status == "red":
+    p0_label = "🔴 Rojo"
+else:
+    p0_label = "🟡 Amarillo"
+
+st.metric("Semáforo confiabilidad ranking", p0_label)
+for reason in (latest_summary.get("p0_reasons") or []):
+    st.caption(f"• {reason}")
+
+mx1, mx2, mx3, mx4 = st.columns(4)
+mx1.metric(
+    "Cobertura",
+    f"{100 * float((latest_metrics.get('coverage') or {}).get('ratio', 0)):.1f}%",
+    delta=f"{100 * float(comparison.get('coverage_delta', 0)):+.1f} pp",
+)
+mx2.metric(
+    "Freshness",
+    f"{100 * float((latest_metrics.get('freshness') or {}).get('ratio', 0)):.1f}%",
+    delta=f"{100 * float(comparison.get('freshness_delta', 0)):+.1f} pp",
+)
+mx3.metric(
+    "Inconsistencias",
+    int((latest_metrics.get("inconsistencies") or {}).get("count", 0)),
+    delta=int(comparison.get("inconsistency_delta", 0)),
+)
+mx4.metric(
+    "Nulos críticos",
+    int((latest_metrics.get("critical_nulls") or {}).get("count", 0)),
+    delta=int(comparison.get("critical_nulls_delta", 0)),
+)
+
+oc1, oc2, oc3 = st.columns(3)
+with oc1:
+    st.caption("Errores por fuente")
+    st.json(latest_summary.get("errors_by_source") or {})
+with oc2:
+    st.caption("Éxito/fallo por universidad")
+    st.json(latest_summary.get("university_counters") or {})
+with oc3:
+    st.caption("Éxito/fallo por conector")
+    st.json(latest_summary.get("connector_counters") or {})
+
+hist_rows = []
+for row in (ops.get("history") or []):
+    summary = row.get("summary") or {}
+    metrics = summary.get("metrics") or {}
+    hist_rows.append(
+        {
+            "Fecha cierre": (row.get("closed_at") or row.get("started_at") or "")[:16],
+            "P0": summary.get("p0_status", "-"),
+            "Cobertura %": round(100 * float((metrics.get("coverage") or {}).get("ratio", 0)), 1),
+            "Freshness %": round(100 * float((metrics.get("freshness") or {}).get("ratio", 0)), 1),
+            "Inconsistencias": int((metrics.get("inconsistencies") or {}).get("count", 0)),
+            "Nulos críticos": int((metrics.get("critical_nulls") or {}).get("count", 0)),
+        }
+    )
+if hist_rows:
+    import pandas as pd
+    st.caption("Comparación histórica semanal (snapshots recientes)")
+    st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
+
+st.divider()
 st.subheader("📅 Historial de scans")
 history = db.get_scan_history(cfg.DB_PATH, limit=5)
 if history:

@@ -1,44 +1,55 @@
 # AcademicRadar — Master Intelligence System (Shenzhen)
 
-AcademicRadar evolucionó de un radar académico general a un **sistema de inteligencia de admisión** para másteres en Shenzhen.
+AcademicRadar es un **sistema de inteligencia de admisión** para másteres en universidades de Shenzhen.
 
-Este repositorio hoy combina:
-- Ingesta de fuentes académicas generales (Scholar/arXiv/GitHub/CNKI/Baidu/RSS).
-- Ingesta de fuentes oficiales universitarias para programas de máster.
-- Versionado por snapshot y auditoría de cambios sensibles.
-- Consola de decisión para priorizar programas y docentes.
+Combina ingesta de fuentes académicas generales (Scholar/arXiv/GitHub/CNKI/Baidu/RSS) con rastreo oficial de programas universitarios, scoring multicriterio y una consola de decisión para priorizar postulaciones.
 
-## Estado actual
+## Estado actual (Abril 2026)
 
-- ✅ Las 6 tareas iniciales del plan de implementación están incorporadas en código (modelo de datos PRD, tracking de universidades/programas, snapshots/diff, consola de decisión y semillas configurables).
-- ✅ El scoring multicriterio PRD ya corre de forma automática por snapshot (`scoring.py`) y persiste sub-scores explicables en `score_breakdowns`.
-- ✅ Se aplica umbral global de confianza (`MIN_CONFIDENCE_TO_RANK`) para bloquear programas de baja confiabilidad en el ranking.
-- ✅ Hardening de conectores por universidad completado para dominios prioritarios Shenzhen (SUSTech/HITSZ/SZU + SIGS Tsinghua + PKU Shenzhen Graduate School), con fallback selector → tabla → regex, retry por dominio y metadatos de troubleshooting.
-- ⚠️ Pendiente: panel de calidad de datos y observabilidad agregada persistente en dashboard.
+| Componente | Estado |
+|---|---|
+| Modelo de datos PRD (universidades, programas, facultad, evidencia) | ✅ |
+| Scraping oficial de programas (SUSTech, HITSZ, SZU, SIGS, PKU-SZ) | ✅ |
+| Snapshots + auditoría de campos sensibles | ✅ |
+| Scoring multicriterio explicable (5 sub-scores) | ✅ |
+| Decision Console (Top-N, deltas, freshness, ranking docentes) | ✅ |
+| Automatización semanal (APScheduler + `run_weekly.py`) | ✅ |
+| Backfill histórico con quality gates | ✅ |
+| Panel de calidad de datos ("📈 Calidad") | ✅ |
+| Alertas automáticas por deadline y cambios sensibles | ✅ |
+| Observabilidad de jobs (timing por paso, detección de fallos recurrentes) | ✅ |
+| Conectores dedicados por universidad (selectores específicos) | ⚠️ en progreso |
+| Vista UI de duración/historial de ejecución por paso | ⚠️ pendiente |
 
-Ver detalle en:
-- `docs/IMPLEMENTATION_STATUS.md`
-- `docs/NEXT_STEPS.md`
-- `docs/PRD_Master_Intelligence_System_Shenzhen.md`
+Ver detalle en `docs/IMPLEMENTATION_STATUS.md` y `docs/NEXT_STEPS.md`.
+
+---
 
 ## Arquitectura funcional
 
-1. **Discovery & Extraction**
-   - `scraper.py` descubre URLs de admisión desde seeds de universidades y extrae campos críticos de programas.
-2. **Storage & Audit**
-   - `database.py` persiste entidades del PRD (`universities`, `programs`, `faculty`, `source_documents`, `evidence_snippets`, `scan_snapshots`, `audit_records`, `score_breakdowns`, etc.).
-3. **Analysis**
-   - `analyzer.py` mantiene el análisis de findings (Claude) del radar clásico.
-4. **Decision UI**
-   - `views/decision_console.py` muestra ranking Top-N, cambios desde último snapshot, freshness y recomendación de docentes.
+```
+INGESTA                   ALMACENAMIENTO           ANÁLISIS & DECISIÓN
+scraper.py ──────────► database.py (SQLite) ──► scoring.py
+  ├─ universidades         ├─ universities            └─ score_breakdowns
+  ├─ programas             ├─ programs
+  ├─ Scholar/arXiv         ├─ scan_snapshots       analyzer.py (Claude API)
+  ├─ GitHub/RSS            ├─ audit_records
+  └─ CNKI/Baidu            └─ evidence_snippets    digest.py
+                                                     ├─ weekly digest
+                                                     └─ deadline alerts
 
-## Estructura rápida
+UI (Streamlit app.py)
+  ├─ 📊 Dashboard          métricas generales
+  ├─ 🧭 Decision Console   ranking Top-N + docentes
+  ├─ 📈 Calidad            semáforo P0, tendencias, inconsistencias
+  ├─ 📬 Digest             historial de digests
+  ├─ 👨‍🏫 Profesores        tracking de docentes
+  ├─ 🔑 Keywords           gestión de keywords
+  ├─ 📄 Findings           browser de findings
+  └─ ⚙️ Configuración      perfil de usuario, pesos, seeds
+```
 
-- `app.py`: entrada Streamlit y navegación.
-- `scraper.py`: scans generales + pipeline Shenzhen.
-- `database.py`: schema y operaciones SQLite.
-- `views/`: pantallas UI, incluyendo Decision Console.
-- `docs/`: PRD, estado de implementación y roadmap operativo.
+---
 
 ## Ejecución local
 
@@ -47,49 +58,67 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Variables útiles:
-- `DB_PATH`
-- `UNIVERSITY_SOURCE_SEEDS` (JSON)
-- `SCRAPER_DELAY`, `ARXIV_MAX_RESULTS`, `SCHOLAR_MAX_RESULTS`, `DAYS_LOOKBACK`
-- `ANTHROPIC_API_KEY` (si se usa análisis con Claude)
+### Variables de entorno clave
 
-### Corrida semanal (producción)
+| Variable | Descripción | Default |
+|---|---|---|
+| `DB_PATH` | Ruta al archivo SQLite | `academic_radar.db` |
+| `ANTHROPIC_API_KEY` | API key para análisis con Claude | — |
+| `UNIVERSITY_SOURCE_SEEDS` | JSON con seeds de universidades | — |
+| `SMTP_HOST/USER/PASSWORD` | Config SMTP para email | — |
+| `EMAIL_TO` | Destinatario de digests y alertas | — |
+| `SCRAPER_DELAY` | Segundos entre requests | `2.0` |
+| `MIN_CONFIDENCE_TO_RANK` | Umbral de confianza para ranking | `0.35` |
+| `BACKFILL_MIN_QUALITY_RATIO` | Quality gate para backfill | `0.55` |
 
+---
+
+## Scripts operativos
+
+### Scan semanal completo
 ```bash
-python run_weekly.py
+python run_weekly.py              # con email
+python run_weekly.py --no-mail    # sin email
+python run_weekly.py --no-alerts  # sin alerta de deadlines
 ```
 
-### Backfill histórico operativo (nuevo)
+El pipeline ejecuta 4 pasos instrumentados (con log de tiempo): scraping → análisis Claude → alertas → digest.
 
-Backfill recomendado: **últimas 4–8 semanas** (default: 6), en corridas secuenciales con control de carga.
-
+### Backfill histórico
 ```bash
 python run_backfill.py --weeks 6 --sleep-between-runs 15 --no-mail
 ```
 
-Frecuencia sugerida por fuente durante backfill (`source_frequency_weeks`):
-- semanal: `google_scholar`, `arxiv`, `rss`, `university`
-- quincenal: `github`, `cnki`, `baidu_scholar`
+Frecuencia por fuente durante backfill:
+- **semanal**: `google_scholar`, `arxiv`, `rss`, `university`
+- **quincenal**: `github`, `cnki`, `baidu_scholar`
 
-Cada snapshot de backfill queda etiquetado en `run_metadata` con:
-- `run_kind=backfill`
-- ventana (`backfill_window_start`, `backfill_window_end`)
-- `source_frequency_weeks`
+El backfill se corta si `quality_ratio = 0.7 × coverage + 0.3 × freshness` cae bajo `BACKFILL_MIN_QUALITY_RATIO`.
 
-Además, cada corrida valida que `change_summary` persistido en `summary_json` coincida con el `change_summary` calculado durante ejecución.
+---
 
-#### Criterio de corte por calidad
+## Panel de calidad ("📈 Calidad")
 
-El backfill se detiene si el índice de calidad cae bajo umbral:
+La vista de calidad muestra por snapshot:
+- **Semáforo P0** (verde/amarillo/rojo) con motivos de degradación.
+- **Métricas con indicadores de tráfico**: cobertura, freshness, inconsistencias, nulos críticos.
+- **Gráfico de tendencia** sobre últimos 20 snapshots.
+- **Breakdown** por universidad y por conector.
+- **Drill-down** de programas con valores contradictorios entre fuentes.
+- **Registro de auditoría** de cambios sensibles en los últimos 14 días.
 
-```text
-quality_ratio = 0.7 * coverage_ratio + 0.3 * freshness_ratio
-```
+---
 
-Umbral por defecto: `BACKFILL_MIN_QUALITY_RATIO=0.55` (configurable por variable de entorno o `--min-quality`).
+## Sistema de alertas
 
-## Roadmap inmediato
+`check_and_send_alerts()` corre automáticamente en cada scan semanal:
+- Detecta programas con **deadline en los próximos 14 días** (vía `derived_data.critical_fields.deadlines.normalized`).
+- Detecta **cambios sensibles** en `audit_records` desde el último scan.
+- Envía email HTML+texto con tabla de urgencia y diff de campos si hay algo que alertar.
 
-Los siguientes pasos técnicos priorizados están documentados en `docs/NEXT_STEPS.md` y se enfocan en:
-- consolidar panel de calidad de datos por snapshot/fuente;
-- y endurecer observabilidad operacional de punta a punta.
+---
+
+## Despliegue en Render.com
+
+Ver `render.yaml` para configuración de free tier (DB efímera) o paid tier ($7/mes con disco persistente).
+Alternativa recomendada para persistencia sin costo: **Turso** (SQLite en cloud, free tier).

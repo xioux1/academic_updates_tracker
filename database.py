@@ -1,28 +1,50 @@
 """
-database.py — All SQLite operations for AcademicRadar.
+database.py — PostgreSQL (Neon) operations for AcademicRadar.
 Handles schema creation, seeding, and CRUD for every table.
 """
 
-import sqlite3
+import psycopg2
+import psycopg2.extras
+import psycopg2.errors
 import json
 import os
 import copy
 from datetime import datetime, timezone
 from typing import Optional
 
-DB_PATH = os.environ.get("DB_PATH", "academic_radar.db")
+DATABASE_URL: str = os.environ.get("DATABASE_URL", "")
+DB_PATH: str = os.environ.get("DB_PATH", "academic_radar.db")  # legacy compat
 
 
 # ---------------------------------------------------------------------------
 # Connection helpers
 # ---------------------------------------------------------------------------
 
-def get_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+def get_connection(db_path: str = DB_PATH):
+    return psycopg2.connect(DATABASE_URL)
+
+
+def _exec(conn, sql: str, params=None):
+    """RealDictCursor execute — use for SELECT (and UPDATE/DELETE with no return)."""
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(sql, params)
+    return cur
+
+
+def _insert(conn, sql: str, params=None) -> int:
+    """Execute an INSERT appending RETURNING id; returns the new row id."""
+    sql_ret = sql.rstrip().rstrip(";") + " RETURNING id"
+    cur = conn.cursor()
+    cur.execute(sql_ret, params)
+    return cur.fetchone()[0]
+
+
+def _scalar(conn, sql: str, params=None):
+    """Execute a scalar SELECT and return the first column of the first row."""
+    cur = conn.cursor()
+    cur.execute(sql, params or ())
+    row = cur.fetchone()
+    return row[0] if row else None
 
 
 def now_iso() -> str:
@@ -35,7 +57,7 @@ def now_iso() -> str:
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS professors (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL PRIMARY KEY,
     name             TEXT NOT NULL,
     name_chinese     TEXT,
     university       TEXT,
@@ -52,7 +74,7 @@ CREATE TABLE IF NOT EXISTS professors (
 );
 
 CREATE TABLE IF NOT EXISTS keywords (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          SERIAL PRIMARY KEY,
     keyword     TEXT NOT NULL,
     language    TEXT NOT NULL DEFAULT 'en'
                     CHECK(language IN ('en','zh')),
@@ -65,7 +87,7 @@ CREATE TABLE IF NOT EXISTS keywords (
 );
 
 CREATE TABLE IF NOT EXISTS sources (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    id                SERIAL PRIMARY KEY,
     name              TEXT NOT NULL,
     url_pattern       TEXT,
     type              TEXT NOT NULL
@@ -76,7 +98,7 @@ CREATE TABLE IF NOT EXISTS sources (
 );
 
 CREATE TABLE IF NOT EXISTS findings (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL PRIMARY KEY,
     professor_id     INTEGER REFERENCES professors(id) ON DELETE SET NULL,
     keyword_id       INTEGER REFERENCES keywords(id) ON DELETE SET NULL,
     source_id        INTEGER REFERENCES sources(id) ON DELETE SET NULL,
@@ -99,7 +121,7 @@ CREATE TABLE IF NOT EXISTS findings (
 );
 
 CREATE TABLE IF NOT EXISTS digests (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    id             SERIAL PRIMARY KEY,
     date_generated TEXT NOT NULL,
     content_json   TEXT,
     email_sent     INTEGER NOT NULL DEFAULT 0,
@@ -107,7 +129,7 @@ CREATE TABLE IF NOT EXISTS digests (
 );
 
 CREATE TABLE IF NOT EXISTS scan_history (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    id                  SERIAL PRIMARY KEY,
     date_ran            TEXT NOT NULL,
     professors_scanned  INTEGER NOT NULL DEFAULT 0,
     keywords_scanned    INTEGER NOT NULL DEFAULT 0,
@@ -117,7 +139,7 @@ CREATE TABLE IF NOT EXISTS scan_history (
 );
 
 CREATE TABLE IF NOT EXISTS universities (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL PRIMARY KEY,
     name             TEXT NOT NULL,
     slug             TEXT UNIQUE,
     country          TEXT,
@@ -131,7 +153,7 @@ CREATE TABLE IF NOT EXISTS universities (
 );
 
 CREATE TABLE IF NOT EXISTS schools_departments (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL PRIMARY KEY,
     university_id    INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
     name             TEXT NOT NULL,
     type             TEXT NOT NULL DEFAULT 'department'
@@ -145,7 +167,7 @@ CREATE TABLE IF NOT EXISTS schools_departments (
 );
 
 CREATE TABLE IF NOT EXISTS programs (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL PRIMARY KEY,
     university_id    INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
     school_id        INTEGER REFERENCES schools_departments(id) ON DELETE SET NULL,
     name             TEXT NOT NULL,
@@ -162,7 +184,7 @@ CREATE TABLE IF NOT EXISTS programs (
 );
 
 CREATE TABLE IF NOT EXISTS faculty (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL PRIMARY KEY,
     university_id    INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
     school_id        INTEGER REFERENCES schools_departments(id) ON DELETE SET NULL,
     name             TEXT NOT NULL,
@@ -178,7 +200,7 @@ CREATE TABLE IF NOT EXISTS faculty (
 );
 
 CREATE TABLE IF NOT EXISTS source_documents (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL PRIMARY KEY,
     entity_type      TEXT NOT NULL,
     entity_id        INTEGER NOT NULL,
     source_name      TEXT,
@@ -194,7 +216,7 @@ CREATE TABLE IF NOT EXISTS source_documents (
 );
 
 CREATE TABLE IF NOT EXISTS evidence_snippets (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL PRIMARY KEY,
     source_document_id INTEGER NOT NULL REFERENCES source_documents(id) ON DELETE CASCADE,
     entity_type      TEXT NOT NULL,
     entity_id        INTEGER NOT NULL,
@@ -208,7 +230,7 @@ CREATE TABLE IF NOT EXISTS evidence_snippets (
 );
 
 CREATE TABLE IF NOT EXISTS snapshots (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL PRIMARY KEY,
     entity_type      TEXT NOT NULL,
     entity_id        INTEGER NOT NULL,
     payload          TEXT NOT NULL,
@@ -216,7 +238,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
 );
 
 CREATE TABLE IF NOT EXISTS scan_snapshots (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL PRIMARY KEY,
     started_at       TEXT NOT NULL,
     closed_at        TEXT,
     status           TEXT NOT NULL DEFAULT 'open'
@@ -226,7 +248,7 @@ CREATE TABLE IF NOT EXISTS scan_snapshots (
 );
 
 CREATE TABLE IF NOT EXISTS snapshot_entities (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL PRIMARY KEY,
     snapshot_id      INTEGER NOT NULL REFERENCES scan_snapshots(id) ON DELETE CASCADE,
     entity_type      TEXT NOT NULL,
     entity_id        INTEGER NOT NULL,
@@ -238,7 +260,7 @@ CREATE TABLE IF NOT EXISTS snapshot_entities (
 );
 
 CREATE TABLE IF NOT EXISTS audit_records (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL PRIMARY KEY,
     entity_type      TEXT NOT NULL,
     entity_id        INTEGER NOT NULL,
     change_type      TEXT NOT NULL,
@@ -250,7 +272,7 @@ CREATE TABLE IF NOT EXISTS audit_records (
 );
 
 CREATE TABLE IF NOT EXISTS score_breakdowns (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL PRIMARY KEY,
     entity_type      TEXT NOT NULL,
     entity_id        INTEGER NOT NULL,
     score_name       TEXT NOT NULL,
@@ -264,7 +286,7 @@ CREATE TABLE IF NOT EXISTS score_breakdowns (
 );
 
 CREATE TABLE IF NOT EXISTS user_profiles (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL PRIMARY KEY,
     user_key         TEXT NOT NULL UNIQUE,
     display_name     TEXT,
     email            TEXT,
@@ -385,10 +407,14 @@ SEED_SOURCES = [
 
 def init_db(db_path: str = DB_PATH) -> None:
     """Create schema and seed data if the database is new."""
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        conn.executescript(SCHEMA_SQL)
-        # Lightweight forward-compatible migrations for existing DB files.
+        cur = conn.cursor()
+        for stmt in SCHEMA_SQL.split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                cur.execute(stmt)
+        # Lightweight forward-compatible migrations.
         _ensure_column(conn, "source_documents", "source_priority", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "source_documents", "content_hash", "TEXT")
         _ensure_column(conn, "programs", "inconsistency_flag", "INTEGER NOT NULL DEFAULT 0")
@@ -401,8 +427,7 @@ def init_db(db_path: str = DB_PATH) -> None:
         conn.commit()
 
         # Only seed if tables are empty
-        cur = conn.execute("SELECT COUNT(*) FROM professors")
-        if cur.fetchone()[0] == 0:
+        if not _scalar(conn, "SELECT COUNT(*) FROM professors"):
             _seed_professors(conn)
             _seed_keywords(conn)
             _seed_sources(conn)
@@ -411,48 +436,46 @@ def init_db(db_path: str = DB_PATH) -> None:
         conn.close()
 
 
-def _ensure_column(
-    conn: sqlite3.Connection,
-    table_name: str,
-    column_name: str,
-    column_sql: str,
-) -> None:
-    columns = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-    existing = {c["name"] for c in columns}
-    if column_name not in existing:
-        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
+def _ensure_column(conn, table_name: str, column_name: str, column_sql: str) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name=%s AND column_name=%s",
+        (table_name, column_name),
+    )
+    if not cur.fetchone():
+        cur.execute(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_sql}")
 
 
-def _seed_professors(conn: sqlite3.Connection) -> None:
+def _seed_professors(conn) -> None:
     ts = now_iso()
     for p in SEED_PROFESSORS:
-        conn.execute(
+        _exec(conn,
             """INSERT INTO professors
                (name, name_chinese, university, department, email,
                 google_scholar_id, github_username, research_areas,
                 status, date_added, date_modified)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (p["name"], p["name_chinese"], p["university"], p["department"],
              p.get("email"), p.get("google_scholar_id"), p.get("github_username"),
              p["research_areas"], p["status"], ts, ts),
         )
 
 
-def _seed_keywords(conn: sqlite3.Connection) -> None:
+def _seed_keywords(conn) -> None:
     ts = now_iso()
     for k in SEED_KEYWORDS:
-        conn.execute(
+        _exec(conn,
             """INSERT INTO keywords (keyword, language, category, weight, active, date_added)
-               VALUES (?,?,?,?,1,?)""",
+               VALUES (%s,%s,%s,%s,1,%s)""",
             (k["keyword"], k["language"], k["category"], k["weight"], ts),
         )
 
 
-def _seed_sources(conn: sqlite3.Connection) -> None:
+def _seed_sources(conn) -> None:
     for s in SEED_SOURCES:
-        conn.execute(
+        _exec(conn,
             """INSERT INTO sources (name, url_pattern, type, active, supports_chinese)
-               VALUES (?,?,?,?,?)""",
+               VALUES (%s,%s,%s,%s,%s)""",
             (s["name"], s["url_pattern"], s["type"], s["active"], s["supports_chinese"]),
         )
 
@@ -480,26 +503,26 @@ SENSITIVE_FIELDS = {"requirements", "deadlines", "tuition", "duration", "faculty
 
 def create_snapshot(run_metadata: Optional[dict], db_path: str = DB_PATH) -> int:
     ts = now_iso()
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        cur = conn.execute(
+        new_id = _insert(conn,
             """INSERT INTO scan_snapshots (started_at, run_metadata, summary_json)
-               VALUES (?,?,?)""",
+               VALUES (%s,%s,%s)""",
             (ts, _json_blob(run_metadata), _json_blob({})),
         )
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
         conn.close()
 
 
 def close_snapshot(snapshot_id: int, db_path: str = DB_PATH) -> None:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        conn.execute(
+        _exec(conn,
             """UPDATE scan_snapshots
-               SET status='closed', closed_at=?
-               WHERE id=?""",
+               SET status='closed', closed_at=%s
+               WHERE id=%s""",
             (now_iso(), snapshot_id),
         )
         conn.commit()
@@ -508,12 +531,12 @@ def close_snapshot(snapshot_id: int, db_path: str = DB_PATH) -> None:
 
 
 def update_snapshot_summary(snapshot_id: int, summary: dict, db_path: str = DB_PATH) -> None:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        conn.execute(
+        _exec(conn,
             """UPDATE scan_snapshots
-               SET summary_json=?
-               WHERE id=?""",
+               SET summary_json=%s
+               WHERE id=%s""",
             (_json_blob(summary), snapshot_id),
         )
         conn.commit()
@@ -522,12 +545,12 @@ def update_snapshot_summary(snapshot_id: int, summary: dict, db_path: str = DB_P
 
 
 def get_scan_snapshot(snapshot_id: int, db_path: str = DB_PATH) -> Optional[dict]:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        row = conn.execute(
+        row = _exec(conn,
             """SELECT id, started_at, closed_at, status, run_metadata, summary_json
                FROM scan_snapshots
-               WHERE id=?
+               WHERE id=%s
                LIMIT 1""",
             (snapshot_id,),
         ).fetchone()
@@ -560,12 +583,12 @@ def upsert_score_breakdown(
     Uniqueness key (logical): entity_type, entity_id, score_name, snapshot_id.
     """
     ts = now_iso()
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        existing = conn.execute(
+        existing = _exec(conn,
             """SELECT id FROM score_breakdowns
-               WHERE entity_type=? AND entity_id=? AND score_name=?
-                 AND ((snapshot_id IS NULL AND ? IS NULL) OR snapshot_id=?)
+               WHERE entity_type=%s AND entity_id=%s AND score_name=%s
+                 AND ((snapshot_id IS NULL AND %s IS NULL) OR snapshot_id=%s)
                ORDER BY id DESC
                LIMIT 1""",
             (entity_type, entity_id, score_name, snapshot_id, snapshot_id),
@@ -583,23 +606,23 @@ def upsert_score_breakdown(
             ts,
         )
         if existing:
-            conn.execute(
+            _exec(conn,
                 """UPDATE score_breakdowns
-                   SET snapshot_id=?, score_value=?, total_score=?, components=?,
-                       explanation=?, confidence_score=?, weights_profile_id=?,
-                       weights_version=?, computed_at=?
-                   WHERE id=?""",
+                   SET snapshot_id=%s, score_value=%s, total_score=%s, components=%s,
+                       explanation=%s, confidence_score=%s, weights_profile_id=%s,
+                       weights_version=%s, computed_at=%s
+                   WHERE id=%s""",
                 (*payload, existing["id"]),
             )
             conn.commit()
             return existing["id"]
 
-        cur = conn.execute(
+        new_id = _insert(conn,
             """INSERT INTO score_breakdowns
                (entity_type, entity_id, score_name, snapshot_id, score_value, total_score,
                 components, explanation, confidence_score, weights_profile_id,
                 weights_version, computed_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (
                 entity_type,
                 entity_id,
@@ -608,7 +631,7 @@ def upsert_score_breakdown(
             ),
         )
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
         conn.close()
 
@@ -618,14 +641,14 @@ def upsert_score_breakdown(
 # ---------------------------------------------------------------------------
 
 def list_user_profiles(db_path: str = DB_PATH) -> list[dict]:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        rows = conn.execute(
+        rows = _exec(conn,
             """
             SELECT *
             FROM user_profiles
             ORDER BY
-                CASE WHEN json_extract(derived_data, '$.is_active') = 1 THEN 0 ELSE 1 END,
+                CASE WHEN (derived_data::json->>'is_active')::int = 1 THEN 0 ELSE 1 END,
                 updated_at DESC,
                 id DESC
             """
@@ -636,10 +659,10 @@ def list_user_profiles(db_path: str = DB_PATH) -> list[dict]:
 
 
 def get_user_profile(profile_id: int, db_path: str = DB_PATH) -> Optional[dict]:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        row = conn.execute(
-            "SELECT * FROM user_profiles WHERE id=? LIMIT 1",
+        row = _exec(conn,
+            "SELECT * FROM user_profiles WHERE id=%s LIMIT 1",
             (profile_id,),
         ).fetchone()
         return dict(row) if row else None
@@ -648,13 +671,13 @@ def get_user_profile(profile_id: int, db_path: str = DB_PATH) -> Optional[dict]:
 
 
 def get_active_user_profile(db_path: str = DB_PATH) -> Optional[dict]:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        row = conn.execute(
+        row = _exec(conn,
             """
             SELECT *
             FROM user_profiles
-            WHERE json_extract(derived_data, '$.is_active') = 1
+            WHERE (derived_data::json->>'is_active')::int = 1
             ORDER BY updated_at DESC, id DESC
             LIMIT 1
             """
@@ -686,14 +709,14 @@ def add_user_profile(data: dict, db_path: str = DB_PATH) -> int:
     is_active = bool(data.get("is_active", False))
     derived_data["is_active"] = 1 if is_active else 0
 
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        cur = conn.execute(
+        new_id = _insert(conn,
             """
             INSERT INTO user_profiles
                 (user_key, display_name, email, role, official_data, derived_data,
                  inferred_data, created_at, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
                 user_key,
@@ -707,7 +730,6 @@ def add_user_profile(data: dict, db_path: str = DB_PATH) -> int:
                 ts,
             ),
         )
-        new_id = cur.lastrowid
         if is_active:
             _deactivate_other_profiles(conn, new_id, ts)
         conn.commit()
@@ -716,9 +738,9 @@ def add_user_profile(data: dict, db_path: str = DB_PATH) -> int:
         conn.close()
 
 
-def _deactivate_other_profiles(conn: sqlite3.Connection, active_profile_id: int, ts: str) -> None:
-    rows = conn.execute(
-        "SELECT id, derived_data FROM user_profiles WHERE id <> ?",
+def _deactivate_other_profiles(conn, active_profile_id: int, ts: str) -> None:
+    rows = _exec(conn,
+        "SELECT id, derived_data FROM user_profiles WHERE id <> %s",
         (active_profile_id,),
     ).fetchall()
     for row in rows:
@@ -726,17 +748,17 @@ def _deactivate_other_profiles(conn: sqlite3.Connection, active_profile_id: int,
         if int(derived.get("is_active", 0)) != 1:
             continue
         derived["is_active"] = 0
-        conn.execute(
-            "UPDATE user_profiles SET derived_data=?, updated_at=? WHERE id=?",
+        _exec(conn,
+            "UPDATE user_profiles SET derived_data=%s, updated_at=%s WHERE id=%s",
             (_json_blob(derived), ts, row["id"]),
         )
 
 
 def update_user_profile(profile_id: int, data: dict, db_path: str = DB_PATH) -> None:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        row = conn.execute(
-            "SELECT * FROM user_profiles WHERE id=? LIMIT 1",
+        row = _exec(conn,
+            "SELECT * FROM user_profiles WHERE id=%s LIMIT 1",
             (profile_id,),
         ).fetchone()
         if not row:
@@ -766,12 +788,12 @@ def update_user_profile(profile_id: int, data: dict, db_path: str = DB_PATH) -> 
             ),
             "updated_at": now_iso(),
         }
-        conn.execute(
+        _exec(conn,
             """
             UPDATE user_profiles
-            SET user_key=?, display_name=?, email=?, role=?, official_data=?,
-                derived_data=?, inferred_data=?, updated_at=?
-            WHERE id=?
+            SET user_key=%s, display_name=%s, email=%s, role=%s, official_data=%s,
+                derived_data=%s, inferred_data=%s, updated_at=%s
+            WHERE id=%s
             """,
             (
                 fields["user_key"],
@@ -793,15 +815,15 @@ def update_user_profile(profile_id: int, data: dict, db_path: str = DB_PATH) -> 
 
 
 def set_active_user_profile(profile_id: int, db_path: str = DB_PATH) -> None:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        rows = conn.execute("SELECT id, derived_data FROM user_profiles").fetchall()
+        rows = _exec(conn, "SELECT id, derived_data FROM user_profiles").fetchall()
         ts = now_iso()
         for row in rows:
             derived = _json_loads(row["derived_data"])
             derived["is_active"] = 1 if row["id"] == profile_id else 0
-            conn.execute(
-                "UPDATE user_profiles SET derived_data=?, updated_at=? WHERE id=?",
+            _exec(conn,
+                "UPDATE user_profiles SET derived_data=%s, updated_at=%s WHERE id=%s",
                 (_json_blob(derived), ts, row["id"]),
             )
         conn.commit()
@@ -810,19 +832,19 @@ def set_active_user_profile(profile_id: int, db_path: str = DB_PATH) -> None:
 
 
 def delete_user_profile(profile_id: int, db_path: str = DB_PATH) -> None:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        conn.execute("DELETE FROM user_profiles WHERE id=?", (profile_id,))
+        _exec(conn, "DELETE FROM user_profiles WHERE id=%s", (profile_id,))
         conn.commit()
     finally:
         conn.close()
 
 
-def _latest_snapshot_entities(conn: sqlite3.Connection, snapshot_id: int) -> dict[tuple[str, int], dict]:
-    rows = conn.execute(
+def _latest_snapshot_entities(conn, snapshot_id: int) -> dict[tuple[str, int], dict]:
+    rows = _exec(conn,
         """SELECT entity_type, entity_id, payload, change_type, inconsistency_flag
            FROM snapshot_entities
-           WHERE snapshot_id=?
+           WHERE snapshot_id=%s
            ORDER BY id DESC""",
         (snapshot_id,),
     ).fetchall()
@@ -840,7 +862,7 @@ def _latest_snapshot_entities(conn: sqlite3.Connection, snapshot_id: int) -> dic
 
 
 def diff_snapshot(previous_snapshot_id: int, current_snapshot_id: int, db_path: str = DB_PATH) -> dict:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
         previous = _latest_snapshot_entities(conn, previous_snapshot_id)
         current = _latest_snapshot_entities(conn, current_snapshot_id)
@@ -882,12 +904,12 @@ def tag_snapshot_entity(
     inconsistency_flag: bool = False,
     db_path: str = DB_PATH,
 ) -> int:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        cur = conn.execute(
+        new_id = _insert(conn,
             """INSERT INTO snapshot_entities
                (snapshot_id, entity_type, entity_id, payload, change_type, inconsistency_flag, created_at)
-               VALUES (?,?,?,?,?,?,?)""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s)""",
             (
                 snapshot_id,
                 entity_type,
@@ -899,7 +921,7 @@ def tag_snapshot_entity(
             ),
         )
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
         conn.close()
 
@@ -911,16 +933,16 @@ def add_audit_record(
     details: dict,
     db_path: str = DB_PATH,
 ) -> int:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        cur = conn.execute(
+        new_id = _insert(conn,
             """INSERT INTO audit_records
                (entity_type, entity_id, change_type, detected_at, details)
-               VALUES (?,?,?,?,?)""",
+               VALUES (%s,%s,%s,%s,%s)""",
             (entity_type, entity_id, change_type, now_iso(), _json_blob(details)),
         )
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
         conn.close()
 
@@ -931,11 +953,11 @@ def get_change_summary_for_ui(
     db_path: str = DB_PATH,
 ) -> dict:
     if previous_snapshot_id is None:
-        conn = get_connection(db_path)
+        conn = get_connection()
         try:
-            row = conn.execute(
+            row = _exec(conn,
                 """SELECT id FROM scan_snapshots
-                   WHERE id < ?
+                   WHERE id < %s
                    ORDER BY id DESC
                    LIMIT 1""",
                 (snapshot_id,),
@@ -961,14 +983,14 @@ def get_change_summary_for_ui(
 
 def add_university(data: dict, db_path: str = DB_PATH) -> int:
     ts = now_iso()
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        cur = conn.execute(
+        new_id = _insert(conn,
             """INSERT INTO universities
                (name, slug, country, city, website,
                 official_data, derived_data, inferred_data,
                 created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (
                 data["name"],
                 data.get("slug"),
@@ -983,15 +1005,15 @@ def add_university(data: dict, db_path: str = DB_PATH) -> int:
             ),
         )
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
         conn.close()
 
 
 def get_universities(db_path: str = DB_PATH) -> list[dict]:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        rows = conn.execute("SELECT * FROM universities ORDER BY name").fetchall()
+        rows = _exec(conn, "SELECT * FROM universities ORDER BY name").fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
@@ -999,13 +1021,13 @@ def get_universities(db_path: str = DB_PATH) -> list[dict]:
 
 def add_program(data: dict, db_path: str = DB_PATH) -> int:
     ts = now_iso()
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        cur = conn.execute(
+        new_id = _insert(conn,
             """INSERT INTO programs
                (university_id, school_id, name, degree_level, delivery_mode, status,
                 official_data, derived_data, inferred_data, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (
                 data["university_id"],
                 data.get("school_id"),
@@ -1021,27 +1043,22 @@ def add_program(data: dict, db_path: str = DB_PATH) -> int:
             ),
         )
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
         conn.close()
 
 
-def _get_program_by_key(
-    conn: sqlite3.Connection,
-    university_id: int,
-    school_id: Optional[int],
-    name: str,
-) -> Optional[sqlite3.Row]:
+def _get_program_by_key(conn, university_id: int, school_id: Optional[int], name: str) -> Optional[dict]:
     if school_id is None:
-        return conn.execute(
+        return _exec(conn,
             """SELECT * FROM programs
-               WHERE university_id=? AND school_id IS NULL AND name=?
+               WHERE university_id=%s AND school_id IS NULL AND name=%s
                LIMIT 1""",
             (university_id, name),
         ).fetchone()
-    return conn.execute(
+    return _exec(conn,
         """SELECT * FROM programs
-           WHERE university_id=? AND school_id=? AND name=?
+           WHERE university_id=%s AND school_id=%s AND name=%s
            LIMIT 1""",
         (university_id, school_id, name),
     ).fetchone()
@@ -1060,7 +1077,7 @@ def upsert_program_with_audit(
     incoming_official = copy.deepcopy(data.get("official_data") or {})
     incoming_derived = copy.deepcopy(data.get("derived_data") or {})
     source_url = (incoming_derived.get("source_url") or "").strip()
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
         row = _get_program_by_key(conn, data["university_id"], data.get("school_id"), data["name"])
         inconsistency_flag = False
@@ -1076,11 +1093,11 @@ def upsert_program_with_audit(
             incoming_derived["source_values"] = source_values
             if source_url:
                 incoming_derived["last_source_url"] = source_url
-            cur = conn.execute(
+            program_id = _insert(conn,
                 """INSERT INTO programs
                    (university_id, school_id, name, degree_level, delivery_mode, status,
                     official_data, derived_data, inferred_data, created_at, updated_at, inconsistency_flag)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (
                     data["university_id"],
                     data.get("school_id"),
@@ -1096,7 +1113,6 @@ def upsert_program_with_audit(
                     0,
                 ),
             )
-            program_id = cur.lastrowid
             change_type = "new"
         else:
             program_id = row["id"]
@@ -1128,12 +1144,12 @@ def upsert_program_with_audit(
             merged_derived["source_values"] = source_values
             merged_derived["last_source_url"] = source_url or old_derived.get("last_source_url")
 
-            conn.execute(
+            _exec(conn,
                 """UPDATE programs
-                   SET degree_level=?, delivery_mode=?, status=?,
-                       official_data=?, derived_data=?, inferred_data=?,
-                       updated_at=?, inconsistency_flag=?
-                   WHERE id=?""",
+                   SET degree_level=%s, delivery_mode=%s, status=%s,
+                       official_data=%s, derived_data=%s, inferred_data=%s,
+                       updated_at=%s, inconsistency_flag=%s
+                   WHERE id=%s""",
                 (
                     data.get("degree_level"),
                     data.get("delivery_mode"),
@@ -1148,10 +1164,10 @@ def upsert_program_with_audit(
             )
             change_type = "updated" if field_changes else "unchanged"
             if field_changes:
-                conn.execute(
+                _exec(conn,
                     """INSERT INTO audit_records
                        (entity_type, entity_id, change_type, detected_at, details)
-                       VALUES (?,?,?,?,?)""",
+                       VALUES (%s,%s,%s,%s,%s)""",
                     (
                         "program",
                         program_id,
@@ -1161,10 +1177,10 @@ def upsert_program_with_audit(
                     ),
                 )
             if inconsistency_flag:
-                conn.execute(
+                _exec(conn,
                     """INSERT INTO audit_records
                        (entity_type, entity_id, change_type, detected_at, details)
-                       VALUES (?,?,?,?,?)""",
+                       VALUES (%s,%s,%s,%s,%s)""",
                     (
                         "program",
                         program_id,
@@ -1196,13 +1212,13 @@ def upsert_program_with_audit(
 
 
 def get_programs(db_path: str = DB_PATH, university_id: Optional[int] = None) -> list[dict]:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
         if university_id is None:
-            rows = conn.execute("SELECT * FROM programs ORDER BY name").fetchall()
+            rows = _exec(conn, "SELECT * FROM programs ORDER BY name").fetchall()
         else:
-            rows = conn.execute(
-                "SELECT * FROM programs WHERE university_id=? ORDER BY name",
+            rows = _exec(conn,
+                "SELECT * FROM programs WHERE university_id=%s ORDER BY name",
                 (university_id,),
             ).fetchall()
         return [dict(r) for r in rows]
@@ -1212,13 +1228,13 @@ def get_programs(db_path: str = DB_PATH, university_id: Optional[int] = None) ->
 
 def add_faculty(data: dict, db_path: str = DB_PATH) -> int:
     ts = now_iso()
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        cur = conn.execute(
+        new_id = _insert(conn,
             """INSERT INTO faculty
                (university_id, school_id, name, title, email, profile_url,
                 official_data, derived_data, inferred_data, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (
                 data["university_id"],
                 data.get("school_id"),
@@ -1234,19 +1250,19 @@ def add_faculty(data: dict, db_path: str = DB_PATH) -> int:
             ),
         )
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
         conn.close()
 
 
 def get_faculty(db_path: str = DB_PATH, university_id: Optional[int] = None) -> list[dict]:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
         if university_id is None:
-            rows = conn.execute("SELECT * FROM faculty ORDER BY name").fetchall()
+            rows = _exec(conn, "SELECT * FROM faculty ORDER BY name").fetchall()
         else:
-            rows = conn.execute(
-                "SELECT * FROM faculty WHERE university_id=? ORDER BY name",
+            rows = _exec(conn,
+                "SELECT * FROM faculty WHERE university_id=%s ORDER BY name",
                 (university_id,),
             ).fetchall()
         return [dict(r) for r in rows]
@@ -1256,11 +1272,11 @@ def get_faculty(db_path: str = DB_PATH, university_id: Optional[int] = None) -> 
 
 def add_snapshot(data: dict, db_path: str = DB_PATH) -> int:
     ts = data.get("created_at") or now_iso()
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        cur = conn.execute(
+        new_id = _insert(conn,
             """INSERT INTO snapshots (entity_type, entity_id, payload, created_at)
-               VALUES (?,?,?,?)""",
+               VALUES (%s,%s,%s,%s)""",
             (
                 data["entity_type"],
                 data["entity_id"],
@@ -1269,17 +1285,17 @@ def add_snapshot(data: dict, db_path: str = DB_PATH) -> int:
             ),
         )
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
         conn.close()
 
 
 def get_snapshots(entity_type: str, entity_id: int, db_path: str = DB_PATH) -> list[dict]:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        rows = conn.execute(
+        rows = _exec(conn,
             """SELECT * FROM snapshots
-               WHERE entity_type=? AND entity_id=?
+               WHERE entity_type=%s AND entity_id=%s
                ORDER BY created_at DESC""",
             (entity_type, entity_id),
         ).fetchall()
@@ -1293,9 +1309,9 @@ def get_snapshots(entity_type: str, entity_id: int, db_path: str = DB_PATH) -> l
 # ---------------------------------------------------------------------------
 
 def get_all_professors(db_path: str = DB_PATH) -> list[dict]:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        rows = conn.execute(
+        rows = _exec(conn,
             """SELECT p.*,
                       COUNT(f.id)      AS findings_total,
                       MAX(f.date_found) AS last_finding
@@ -1310,9 +1326,9 @@ def get_all_professors(db_path: str = DB_PATH) -> list[dict]:
 
 
 def get_professor(prof_id: int, db_path: str = DB_PATH) -> Optional[dict]:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        row = conn.execute("SELECT * FROM professors WHERE id=?", (prof_id,)).fetchone()
+        row = _exec(conn, "SELECT * FROM professors WHERE id=%s", (prof_id,)).fetchone()
         return dict(row) if row else None
     finally:
         conn.close()
@@ -1320,21 +1336,21 @@ def get_professor(prof_id: int, db_path: str = DB_PATH) -> Optional[dict]:
 
 def add_professor(data: dict, db_path: str = DB_PATH) -> int:
     ts = now_iso()
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        cur = conn.execute(
+        new_id = _insert(conn,
             """INSERT INTO professors
                (name, name_chinese, university, department, email,
                 google_scholar_id, github_username, research_areas,
                 status, notes, date_added, date_modified)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (data.get("name"), data.get("name_chinese"), data.get("university"),
              data.get("department"), data.get("email"), data.get("google_scholar_id"),
              data.get("github_username"), data.get("research_areas"),
              data.get("status", "watching"), data.get("notes"), ts, ts),
         )
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
         conn.close()
 
@@ -1343,14 +1359,14 @@ def update_professor(prof_id: int, data: dict, db_path: str = DB_PATH) -> None:
     ts = now_iso()
     fields = ["name", "name_chinese", "university", "department", "email",
               "google_scholar_id", "github_username", "research_areas", "status", "notes"]
-    set_clauses = ", ".join(f"{f}=?" for f in fields if f in data)
+    set_clauses = ", ".join(f"{f}=%s" for f in fields if f in data)
     values = [data[f] for f in fields if f in data]
     if not set_clauses:
         return
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        conn.execute(
-            f"UPDATE professors SET {set_clauses}, date_modified=? WHERE id=?",
+        _exec(conn,
+            f"UPDATE professors SET {set_clauses}, date_modified=%s WHERE id=%s",
             (*values, ts, prof_id),
         )
         conn.commit()
@@ -1359,9 +1375,9 @@ def update_professor(prof_id: int, data: dict, db_path: str = DB_PATH) -> None:
 
 
 def delete_professor(prof_id: int, db_path: str = DB_PATH) -> None:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        conn.execute("DELETE FROM professors WHERE id=?", (prof_id,))
+        _exec(conn, "DELETE FROM professors WHERE id=%s", (prof_id,))
         conn.commit()
     finally:
         conn.close()
@@ -1372,9 +1388,9 @@ def delete_professor(prof_id: int, db_path: str = DB_PATH) -> None:
 # ---------------------------------------------------------------------------
 
 def get_all_keywords(db_path: str = DB_PATH) -> list[dict]:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        rows = conn.execute(
+        rows = _exec(conn,
             """SELECT k.*,
                       COUNT(f.id) AS findings_count
                FROM keywords k
@@ -1389,37 +1405,37 @@ def get_all_keywords(db_path: str = DB_PATH) -> list[dict]:
 
 def add_keyword(data: dict, db_path: str = DB_PATH) -> int:
     ts = now_iso()
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        cur = conn.execute(
-            "INSERT INTO keywords (keyword, language, category, weight, active, date_added) VALUES (?,?,?,?,1,?)",
+        new_id = _insert(conn,
+            "INSERT INTO keywords (keyword, language, category, weight, active, date_added) VALUES (%s,%s,%s,%s,1,%s)",
             (data["keyword"], data.get("language", "en"), data.get("category", "topic"),
              data.get("weight", 3), ts),
         )
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
         conn.close()
 
 
 def update_keyword(kw_id: int, data: dict, db_path: str = DB_PATH) -> None:
     fields = ["keyword", "language", "category", "weight", "active"]
-    set_clauses = ", ".join(f"{f}=?" for f in fields if f in data)
+    set_clauses = ", ".join(f"{f}=%s" for f in fields if f in data)
     values = [data[f] for f in fields if f in data]
     if not set_clauses:
         return
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        conn.execute(f"UPDATE keywords SET {set_clauses} WHERE id=?", (*values, kw_id))
+        _exec(conn, f"UPDATE keywords SET {set_clauses} WHERE id=%s", (*values, kw_id))
         conn.commit()
     finally:
         conn.close()
 
 
 def delete_keyword(kw_id: int, db_path: str = DB_PATH) -> None:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        conn.execute("DELETE FROM keywords WHERE id=?", (kw_id,))
+        _exec(conn, "DELETE FROM keywords WHERE id=%s", (kw_id,))
         conn.commit()
     finally:
         conn.close()
@@ -1430,9 +1446,9 @@ def delete_keyword(kw_id: int, db_path: str = DB_PATH) -> None:
 # ---------------------------------------------------------------------------
 
 def get_all_sources(db_path: str = DB_PATH) -> list[dict]:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        rows = conn.execute("SELECT * FROM sources ORDER BY name").fetchall()
+        rows = _exec(conn, "SELECT * FROM sources ORDER BY name").fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
@@ -1440,13 +1456,13 @@ def get_all_sources(db_path: str = DB_PATH) -> list[dict]:
 
 def update_source(src_id: int, data: dict, db_path: str = DB_PATH) -> None:
     fields = ["name", "url_pattern", "type", "active", "supports_chinese"]
-    set_clauses = ", ".join(f"{f}=?" for f in fields if f in data)
+    set_clauses = ", ".join(f"{f}=%s" for f in fields if f in data)
     values = [data[f] for f in fields if f in data]
     if not set_clauses:
         return
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        conn.execute(f"UPDATE sources SET {set_clauses} WHERE id=?", (*values, src_id))
+        _exec(conn, f"UPDATE sources SET {set_clauses} WHERE id=%s", (*values, src_id))
         conn.commit()
     finally:
         conn.close()
@@ -1458,9 +1474,9 @@ def update_source(src_id: int, data: dict, db_path: str = DB_PATH) -> None:
 
 def url_exists(url: str, db_path: str = DB_PATH) -> bool:
     """Deduplication check — returns True if URL is already in findings."""
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        row = conn.execute("SELECT 1 FROM findings WHERE url=?", (url,)).fetchone()
+        row = _exec(conn, "SELECT 1 FROM findings WHERE url=%s", (url,)).fetchone()
         return row is not None
     finally:
         conn.close()
@@ -1468,37 +1484,40 @@ def url_exists(url: str, db_path: str = DB_PATH) -> bool:
 
 def add_finding(data: dict, db_path: str = DB_PATH) -> Optional[int]:
     """Insert a new finding. Returns rowid or None if URL already exists."""
-    if url_exists(data["url"], db_path):
+    if url_exists(data["url"]):
         return None
     ts = now_iso()
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        cur = conn.execute(
+        new_id = _insert(conn,
             """INSERT INTO findings
                (professor_id, keyword_id, source_id, title, url,
                 date_published, date_found, summary_original,
                 language, is_chinese_source)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (data.get("professor_id"), data.get("keyword_id"), data.get("source_id"),
              data["title"], data["url"], data.get("date_published"), ts,
              data.get("summary_original"), data.get("language", "en"),
              int(data.get("is_chinese_source", False))),
         )
         conn.commit()
-        return cur.lastrowid
+        return new_id
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
+        return None
     finally:
         conn.close()
 
 
 def update_finding_analysis(finding_id: int, analysis: dict, db_path: str = DB_PATH) -> None:
     """Store Claude's analysis result on an existing finding."""
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        conn.execute(
+        _exec(conn,
             """UPDATE findings SET
-               summary_claude=?, relevance_score=?, relevance_reason=?,
-               actionable=?, action_suggestion=?, translation=?
-               WHERE id=?""",
+               summary_claude=%s, relevance_score=%s, relevance_reason=%s,
+               actionable=%s, action_suggestion=%s, translation=%s
+               WHERE id=%s""",
             (analysis.get("summary"), analysis.get("relevance_score"),
              analysis.get("relevance_reason"), int(analysis.get("actionable", False)),
              analysis.get("action_suggestion"), analysis.get("translation"),
@@ -1525,22 +1544,22 @@ def get_findings(
     params: list = []
 
     if professor_id is not None:
-        conditions.append("f.professor_id=?")
+        conditions.append("f.professor_id=%s")
         params.append(professor_id)
     if source_id is not None:
-        conditions.append("f.source_id=?")
+        conditions.append("f.source_id=%s")
         params.append(source_id)
     if language is not None:
-        conditions.append("f.language=?")
+        conditions.append("f.language=%s")
         params.append(language)
     if min_score is not None:
-        conditions.append("f.relevance_score >= ?")
+        conditions.append("f.relevance_score >= %s")
         params.append(min_score)
     if read is not None:
-        conditions.append("f.read=?")
+        conditions.append("f.read=%s")
         params.append(int(read))
     if actionable is not None:
-        conditions.append("f.actionable=?")
+        conditions.append("f.actionable=%s")
         params.append(int(actionable))
     if unanalyzed:
         conditions.append("f.summary_claude IS NULL")
@@ -1558,13 +1577,13 @@ def get_findings(
         LEFT JOIN keywords   k ON k.id = f.keyword_id
         {where}
         ORDER BY f.date_found DESC
-        LIMIT ? OFFSET ?
+        LIMIT %s OFFSET %s
     """
     params.extend([limit, offset])
 
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        rows = conn.execute(sql, params).fetchall()
+        rows = _exec(conn, sql, params).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
@@ -1572,22 +1591,22 @@ def get_findings(
 
 def update_finding(finding_id: int, data: dict, db_path: str = DB_PATH) -> None:
     fields = ["read", "actionable", "notes", "relevance_score"]
-    set_clauses = ", ".join(f"{f}=?" for f in fields if f in data)
+    set_clauses = ", ".join(f"{f}=%s" for f in fields if f in data)
     values = [data[f] for f in fields if f in data]
     if not set_clauses:
         return
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        conn.execute(f"UPDATE findings SET {set_clauses} WHERE id=?", (*values, finding_id))
+        _exec(conn, f"UPDATE findings SET {set_clauses} WHERE id=%s", (*values, finding_id))
         conn.commit()
     finally:
         conn.close()
 
 
 def get_finding(finding_id: int, db_path: str = DB_PATH) -> Optional[dict]:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        row = conn.execute("SELECT * FROM findings WHERE id=?", (finding_id,)).fetchone()
+        row = _exec(conn, "SELECT * FROM findings WHERE id=%s", (finding_id,)).fetchone()
         return dict(row) if row else None
     finally:
         conn.close()
@@ -1604,31 +1623,31 @@ def count_findings(db_path: str = DB_PATH, **kwargs) -> int:
 
 def save_digest(content: dict, findings_count: int, db_path: str = DB_PATH) -> int:
     ts = now_iso()
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        cur = conn.execute(
-            "INSERT INTO digests (date_generated, content_json, email_sent, findings_count) VALUES (?,?,0,?)",
+        new_id = _insert(conn,
+            "INSERT INTO digests (date_generated, content_json, email_sent, findings_count) VALUES (%s,%s,0,%s)",
             (ts, json.dumps(content, ensure_ascii=False), findings_count),
         )
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
         conn.close()
 
 
 def mark_digest_sent(digest_id: int, db_path: str = DB_PATH) -> None:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        conn.execute("UPDATE digests SET email_sent=1 WHERE id=?", (digest_id,))
+        _exec(conn, "UPDATE digests SET email_sent=1 WHERE id=%s", (digest_id,))
         conn.commit()
     finally:
         conn.close()
 
 
 def get_digests(db_path: str = DB_PATH) -> list[dict]:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        rows = conn.execute("SELECT * FROM digests ORDER BY date_generated DESC").fetchall()
+        rows = _exec(conn, "SELECT * FROM digests ORDER BY date_generated DESC").fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
@@ -1640,28 +1659,28 @@ def get_digests(db_path: str = DB_PATH) -> list[dict]:
 
 def log_scan(data: dict, db_path: str = DB_PATH) -> int:
     ts = now_iso()
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        cur = conn.execute(
+        new_id = _insert(conn,
             """INSERT INTO scan_history
                (date_ran, professors_scanned, keywords_scanned,
                 findings_total, findings_new, errors_json)
-               VALUES (?,?,?,?,?,?)""",
+               VALUES (%s,%s,%s,%s,%s,%s)""",
             (ts, data.get("professors_scanned", 0), data.get("keywords_scanned", 0),
              data.get("findings_total", 0), data.get("findings_new", 0),
              json.dumps(data.get("errors", []), ensure_ascii=False)),
         )
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
         conn.close()
 
 
 def get_scan_history(db_path: str = DB_PATH, limit: int = 20) -> list[dict]:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        rows = conn.execute(
-            "SELECT * FROM scan_history ORDER BY date_ran DESC LIMIT ?", (limit,)
+        rows = _exec(conn,
+            "SELECT * FROM scan_history ORDER BY date_ran DESC LIMIT %s", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -1672,15 +1691,15 @@ def get_operational_metrics(db_path: str = DB_PATH, limit: int = 8) -> dict:
     """
     Returns latest snapshot operational metrics and week-vs-week comparison.
     """
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        rows = conn.execute(
+        rows = _exec(conn,
             """
             SELECT id, started_at, closed_at, summary_json
             FROM scan_snapshots
             WHERE status='closed'
             ORDER BY id DESC
-            LIMIT ?
+            LIMIT %s
             """,
             (limit,),
         ).fetchall()
@@ -1742,24 +1761,23 @@ def get_operational_metrics(db_path: str = DB_PATH, limit: int = 8) -> dict:
 # ---------------------------------------------------------------------------
 
 def get_stats(db_path: str = DB_PATH) -> dict:
-    conn = get_connection(db_path)
+    conn = get_connection()
     try:
-        def scalar(sql):
-            return conn.execute(sql).fetchone()[0] or 0
-
+        avg_raw = _scalar(conn,
+            "SELECT ROUND(AVG(relevance_score)::numeric, 1)::float FROM findings WHERE relevance_score IS NOT NULL"
+        )
+        last_scan_row = _exec(conn,
+            "SELECT date_ran FROM scan_history ORDER BY date_ran DESC LIMIT 1"
+        ).fetchone()
         return {
-            "total_findings":    scalar("SELECT COUNT(*) FROM findings"),
-            "unread_findings":   scalar("SELECT COUNT(*) FROM findings WHERE read=0"),
-            "actionable":        scalar("SELECT COUNT(*) FROM findings WHERE actionable=1"),
-            "avg_score":         conn.execute(
-                "SELECT ROUND(AVG(relevance_score),1) FROM findings WHERE relevance_score IS NOT NULL"
-            ).fetchone()[0] or 0,
-            "total_professors":  scalar("SELECT COUNT(*) FROM professors"),
-            "active_professors": scalar("SELECT COUNT(*) FROM professors WHERE status='active'"),
-            "total_keywords":    scalar("SELECT COUNT(*) FROM keywords WHERE active=1"),
-            "last_scan": (conn.execute(
-                "SELECT date_ran FROM scan_history ORDER BY date_ran DESC LIMIT 1"
-            ).fetchone() or [None])[0],
+            "total_findings":    _scalar(conn, "SELECT COUNT(*) FROM findings") or 0,
+            "unread_findings":   _scalar(conn, "SELECT COUNT(*) FROM findings WHERE read=0") or 0,
+            "actionable":        _scalar(conn, "SELECT COUNT(*) FROM findings WHERE actionable=1") or 0,
+            "avg_score":         float(avg_raw) if avg_raw is not None else 0,
+            "total_professors":  _scalar(conn, "SELECT COUNT(*) FROM professors") or 0,
+            "active_professors": _scalar(conn, "SELECT COUNT(*) FROM professors WHERE status='active'") or 0,
+            "total_keywords":    _scalar(conn, "SELECT COUNT(*) FROM keywords WHERE active=1") or 0,
+            "last_scan":         last_scan_row["date_ran"] if last_scan_row else None,
         }
     finally:
         conn.close()

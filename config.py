@@ -32,6 +32,7 @@ EMAIL_SUBJECT_PREFIX: str = "[AcademicRadar]"
 # ---------------------------------------------------------------------------
 
 DB_PATH: str = os.environ.get("DB_PATH", "academic_radar.db")
+DATABASE_URL: str = os.environ.get("DATABASE_URL", "")
 
 # ---------------------------------------------------------------------------
 # Scraper behaviour

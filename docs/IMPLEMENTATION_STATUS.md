@@ -4,9 +4,9 @@ Este documento resume qué partes del PRD ya están implementadas en el reposito
 
 ## Resumen ejecutivo
 
-- **Completado**: P0 scoring + consola de decisión, y el bloque P1 de calidad/operaciones.
-- **Parcial**: conectores dedicados por universidad, recalculo dinámico de ranking en UI.
-- **Pendiente**: conectores específicos SUSTech/HITSZ/SZU, UI de duración de jobs.
+- **Completado**: P0, P1 y P2 completos. Sistema operacionalmente completo.
+- **Parcial**: recalculo dinámico de ranking en UI sin full reload (UX menor).
+- **No urgente**: Slack/webhooks, ampliar cobertura fuera de Shenzhen.
 
 ---
 
@@ -73,14 +73,19 @@ Implementado en `digest.py` + `database.py`:
 - `get_upcoming_deadline_programs()` en `database.py` — query sobre `derived_data.critical_fields.deadlines.normalized`.
 - `get_recent_audit_changes()` en `database.py` — cambios sensibles desde `audit_records`.
 
-## Tarea 9 — Observabilidad de jobs (✅ parcial)
+## Tarea 9 — Observabilidad de jobs (✅ Completo)
 
-Implementado en `run_weekly.py` + `database.py`:
-- `_step()` context manager — log de inicio/fin con tiempo transcurrido por paso.
-- 4 pasos instrumentados: scraping, análisis, alertas, digest.
-- `get_consecutive_scan_failures()` en `database.py` — detecta patrones de fallo en historial de scans.
-- `_warn_consecutive_failures()` — warning al final de cada run semanal.
-- **Pendiente**: vista UI con historial de duraciones y tasa de éxito por fuente.
+Implementado en `run_weekly.py` + `database.py` + `views/jobs.py`:
+- `scan_history` tiene `step_durations_json`, `total_duration_s`, `analysis_failed`, `alerts_count`.
+- `_step()` context manager acumula tiempos en `step_times` dict; se persisten en `log_scan()`.
+- `get_consecutive_scan_failures()` detecta patrones de fallo en historial de scans.
+- `views/jobs.py` — "🔧 Jobs" en sidebar: tabla de ejecuciones, gráfico de tiempos por paso, fallos consecutivos, botón de scan rápido.
+
+## Tarea 10 — Selectores CSS por universidad (✅ Completo)
+
+Implementado en `scraper.py`:
+- `CONNECTOR_REGISTRY` para SUSTech y HITSZ ahora incluye `field_selectors` por campo crítico y `normalizers: ["selector","regex","table"]`, alineándolos con SZU/SIGS/PKU-SZ.
+- `_record_connector_counter()` registra `normalizers_used` (cuántas URLs usaron selector vs regex vs table) en el `connector_counters` del `summary_json` del snapshot — visible en "📈 Calidad".
 
 ---
 

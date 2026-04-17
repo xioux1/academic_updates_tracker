@@ -17,9 +17,8 @@ Combina ingesta de fuentes académicas generales (Scholar/arXiv/GitHub/CNKI/Baid
 | Backfill histórico con quality gates | ✅ |
 | Panel de calidad de datos ("📈 Calidad") | ✅ |
 | Alertas automáticas por deadline y cambios sensibles | ✅ |
-| Observabilidad de jobs (timing por paso, detección de fallos recurrentes) | ✅ |
-| Conectores dedicados por universidad (selectores específicos) | ⚠️ en progreso |
-| Vista UI de duración/historial de ejecución por paso | ⚠️ pendiente |
+| Observabilidad de jobs — timing persistido + vista "🔧 Jobs" | ✅ |
+| Selectores CSS dedicados para SUSTech, HITSZ, SZU, SIGS, PKU-SZ | ✅ |
 
 Ver detalle en `docs/IMPLEMENTATION_STATUS.md` y `docs/NEXT_STEPS.md`.
 

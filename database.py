@@ -113,7 +113,11 @@ CREATE TABLE IF NOT EXISTS scan_history (
     keywords_scanned    INTEGER NOT NULL DEFAULT 0,
     findings_total      INTEGER NOT NULL DEFAULT 0,
     findings_new        INTEGER NOT NULL DEFAULT 0,
-    errors_json         TEXT
+    errors_json         TEXT,
+    step_durations_json TEXT,
+    total_duration_s    REAL,
+    analysis_failed     INTEGER DEFAULT 0,
+    alerts_count        INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS universities (
@@ -398,6 +402,10 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "score_breakdowns", "confidence_score", "REAL")
         _ensure_column(conn, "score_breakdowns", "weights_profile_id", "INTEGER")
         _ensure_column(conn, "score_breakdowns", "weights_version", "TEXT")
+        _ensure_column(conn, "scan_history", "step_durations_json", "TEXT")
+        _ensure_column(conn, "scan_history", "total_duration_s", "REAL")
+        _ensure_column(conn, "scan_history", "analysis_failed", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "scan_history", "alerts_count", "INTEGER DEFAULT 0")
         conn.commit()
 
         # Only seed if tables are empty
@@ -1659,11 +1667,22 @@ def log_scan(data: dict, db_path: str = DB_PATH) -> int:
         cur = conn.execute(
             """INSERT INTO scan_history
                (date_ran, professors_scanned, keywords_scanned,
-                findings_total, findings_new, errors_json)
-               VALUES (?,?,?,?,?,?)""",
-            (ts, data.get("professors_scanned", 0), data.get("keywords_scanned", 0),
-             data.get("findings_total", 0), data.get("findings_new", 0),
-             json.dumps(data.get("errors", []), ensure_ascii=False)),
+                findings_total, findings_new, errors_json,
+                step_durations_json, total_duration_s,
+                analysis_failed, alerts_count)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                ts,
+                data.get("professors_scanned", 0),
+                data.get("keywords_scanned", 0),
+                data.get("findings_total", 0),
+                data.get("findings_new", 0),
+                json.dumps(data.get("errors", []), ensure_ascii=False),
+                json.dumps(data.get("step_durations") or {}, ensure_ascii=False),
+                data.get("total_duration_s"),
+                1 if data.get("analysis_failed") else 0,
+                data.get("alerts_count", 0),
+            ),
         )
         conn.commit()
         return cur.lastrowid

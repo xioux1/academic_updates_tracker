@@ -402,12 +402,40 @@ CONNECTOR_REGISTRY: dict[str, dict[str, Any]] = {
     "SUSTech": {
         "selectors": ["main", "article", ".content", ".article-content"],
         "fallback_selectors": ["body"],
-        "normalizers": ["regex", "table"],
+        "normalizers": ["selector", "regex", "table"],
+        "field_selectors": {
+            "language":     [".content .program-language", "article .program-language",
+                             ".article-content .program-language", "td.language", ".lang-tag"],
+            "duration":     [".content .program-duration", "article .program-duration",
+                             ".article-content .program-duration", "td.duration"],
+            "tuition":      [".content .program-tuition", "article .program-tuition",
+                             ".article-content .program-tuition", "td.fee", "td.tuition"],
+            "requirements": [".content .program-requirements", "article .program-requirements",
+                             ".article-content .program-requirements", ".requirement-block"],
+            "deadlines":    [".content .program-deadline", "article .program-deadline",
+                             ".article-content .program-deadline", "td.deadline", ".deadline-date"],
+            "portal":       [".content a.apply-link", "article a.apply-link",
+                             ".article-content a.apply-link", "a[href*='apply']", "a[href*='admission']"],
+        },
     },
     "Harbin Institute of Technology, Shenzhen": {
         "selectors": ["main", "#content", ".main-content", ".wp_articlecontent"],
         "fallback_selectors": ["body"],
-        "normalizers": ["regex", "table"],
+        "normalizers": ["selector", "regex", "table"],
+        "field_selectors": {
+            "language":     [".wp_articlecontent .program-language", ".main-content .program-language",
+                             "td.language", ".lang-tag"],
+            "duration":     [".wp_articlecontent .program-duration", ".main-content .program-duration",
+                             "td.duration", ".duration-block"],
+            "tuition":      [".wp_articlecontent .program-tuition", ".main-content .program-tuition",
+                             "td.fee", "td.tuition", ".fee-block"],
+            "requirements": [".wp_articlecontent .program-requirements", ".main-content .program-requirements",
+                             ".requirement-block", "td.requirement"],
+            "deadlines":    [".wp_articlecontent .program-deadline", ".main-content .program-deadline",
+                             "td.deadline", ".deadline-date", "td.apply-deadline"],
+            "portal":       [".wp_articlecontent a.apply-link", ".main-content a.apply-link",
+                             "a[href*='apply']", "a[href*='admission']", "a[href*='enroll']"],
+        },
     },
     "Shenzhen University": {
         "selectors": ["main", "#vsb_content", ".article-content", ".v_news_content"],
@@ -753,6 +781,7 @@ def scrape_university_pages(
     critical_fields_complete = 0
     null_field_count = 0
     connector_name = university.get("name", "unknown_connector")
+    normalizers_used: dict[str, int] = {}
     errors: list[str] = []
 
     try:
@@ -795,6 +824,8 @@ def scrape_university_pages(
             else:
                 connector_fail += 1
                 errors.append(f"no_programs_extracted:{url}")
+            normalizer = connector_metadata.get("normalizer_used") or "unknown"
+            normalizers_used[normalizer] = normalizers_used.get(normalizer, 0) + 1
             technical_metadata = {
                 "status_code": fetch_result.get("status_code"),
                 "redirect_chain": fetch_result.get("redirect_chain", []),
@@ -897,6 +928,7 @@ def scrape_university_pages(
             "connector_name": connector_name,
             "connector_success": connector_success,
             "connector_fail": connector_fail,
+            "normalizers_used": normalizers_used,
             "critical_fields_expected": critical_fields_expected,
             "critical_fields_complete": critical_fields_complete,
             "critical_field_completeness_pct": round(completeness_pct, 2),
@@ -1510,11 +1542,14 @@ def run_full_scan(
         current["success"] += success
         current["fail"] += fail
 
-    def _record_connector_counter(connector_name: str, *, success: int = 0, fail: int = 0) -> None:
+    def _record_connector_counter(connector_name: str, *, success: int = 0, fail: int = 0, normalizers_used: dict | None = None) -> None:
         name = connector_name or "unknown_connector"
-        current = summary["connector_counters"].setdefault(name, {"success": 0, "fail": 0})
+        current = summary["connector_counters"].setdefault(name, {"success": 0, "fail": 0, "normalizers_used": {}})
         current["success"] += success
         current["fail"] += fail
+        if normalizers_used:
+            for norm, count in normalizers_used.items():
+                current["normalizers_used"][norm] = current["normalizers_used"].get(norm, 0) + count
 
     def safe_add(finding: dict) -> bool:
         nonlocal fresh_items, stale_items
@@ -1677,6 +1712,7 @@ def run_full_scan(
                 uni_summary.get("connector_name", "unknown_connector"),
                 success=uni_summary.get("connector_success", 0),
                 fail=uni_summary.get("connector_fail", 0),
+                normalizers_used=uni_summary.get("normalizers_used"),
             )
             if uni_summary.get("errors"):
                 for err in uni_summary["errors"]:

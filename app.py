@@ -126,7 +126,7 @@ with st.sidebar:
     page = st.radio(
         "Navegación",
         ["📊 Dashboard", "🧭 Decision Console", "👨‍🏫 Profesores", "🔑 Keywords",
-         "📄 Findings", "📬 Digest", "📈 Calidad", "⚙️ Configuración"],
+         "📄 Findings", "📬 Digest", "📈 Calidad", "🔧 Jobs", "⚙️ Configuración"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -147,4 +147,5 @@ elif page == "🔑 Keywords":         exec(open(os.path.join(_views_dir, "keywor
 elif page == "📄 Findings":         exec(open(os.path.join(_views_dir, "findings.py")).read())
 elif page == "📬 Digest":           exec(open(os.path.join(_views_dir, "digest_view.py")).read())
 elif page == "📈 Calidad":          exec(open(os.path.join(_views_dir, "quality.py")).read())
+elif page == "🔧 Jobs":             exec(open(os.path.join(_views_dir, "jobs.py")).read())
 elif page == "⚙️ Configuración":    exec(open(os.path.join(_views_dir, "settings.py")).read())

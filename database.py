@@ -1789,6 +1789,116 @@ def get_latest_extraction_quality_snapshot(db_path: str = DB_PATH) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Alert helpers
+# ---------------------------------------------------------------------------
+
+def get_upcoming_deadline_programs(days_ahead: int = 14, db_path: str = DB_PATH) -> list[dict]:
+    """
+    Return programs whose normalized deadline falls within the next `days_ahead` days.
+    Deadline is stored in derived_data->critical_fields->deadlines->normalized (YYYY-MM-DD).
+    """
+    from datetime import datetime, timezone, timedelta
+    today = datetime.now(timezone.utc).date()
+    cutoff = today + timedelta(days=days_ahead)
+    today_str = today.isoformat()
+    cutoff_str = cutoff.isoformat()
+
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT p.id, p.name, p.derived_data, p.official_data,
+                      u.name AS university_name
+               FROM programs p
+               JOIN universities u ON u.id = p.university_id
+               ORDER BY p.name"""
+        ).fetchall()
+        programs = [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+    results = []
+    for prog in programs:
+        derived = _json_loads(prog.get("derived_data"))
+        deadline_norm = (derived.get("critical_fields") or {}).get("deadlines", {}).get("normalized")
+        if deadline_norm and today_str <= deadline_norm <= cutoff_str:
+            results.append({
+                "id": prog["id"],
+                "name": prog["name"],
+                "university_name": prog["university_name"],
+                "deadline_date": deadline_norm,
+                "days_until": (datetime.strptime(deadline_norm, "%Y-%m-%d").date() - today).days,
+            })
+
+    results.sort(key=lambda x: x["deadline_date"])
+    return results
+
+
+def get_recent_audit_changes(since_iso: str, db_path: str = DB_PATH) -> list[dict]:
+    """
+    Return audit_records of type 'sensitive_change' or 'inconsistency' since `since_iso`.
+    Enriches each record with program/university name where available.
+    """
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            """SELECT ar.id, ar.entity_type, ar.entity_id, ar.change_type,
+                      ar.detected_at, ar.details,
+                      COALESCE(p.name, '') AS program_name,
+                      COALESCE(u.name, '') AS university_name
+               FROM audit_records ar
+               LEFT JOIN programs p ON ar.entity_type='program' AND p.id = ar.entity_id
+               LEFT JOIN universities u ON u.id = p.university_id
+               WHERE ar.detected_at >= ?
+                 AND ar.change_type IN ('sensitive_change', 'inconsistency', 'field_change')
+               ORDER BY ar.detected_at DESC
+               LIMIT 100""",
+            (since_iso,),
+        ).fetchall()
+        records = [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+    for rec in records:
+        rec["details_parsed"] = _json_loads(rec.get("details"))
+    return records
+
+
+def get_consecutive_scan_failures(threshold: int = 3, db_path: str = DB_PATH) -> list[dict]:
+    """
+    Return sources/universities that have failed in consecutive scans.
+    Checks the last `threshold + 2` scan_history records for repeated errors.
+    """
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT errors_json FROM scan_history ORDER BY date_ran DESC LIMIT ?",
+            (threshold + 2,),
+        ).fetchall()
+        recent_errors = [_json_loads(r["errors_json"]) or [] for r in rows]
+    finally:
+        conn.close()
+
+    if len(recent_errors) < threshold:
+        return []
+
+    # Count how many of the last `threshold` scans each source appears in errors
+    source_fail_counts: dict[str, int] = {}
+    for errors_list in recent_errors[:threshold]:
+        seen_in_run: set[str] = set()
+        for err in errors_list if isinstance(errors_list, list) else []:
+            key = str(err)[:60]
+            seen_in_run.add(key)
+        for key in seen_in_run:
+            source_fail_counts[key] = source_fail_counts.get(key, 0) + 1
+
+    return [
+        {"error_pattern": key, "consecutive_failures": count}
+        for key, count in source_fail_counts.items()
+        if count >= threshold
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Stats helpers used by the dashboard
 # ---------------------------------------------------------------------------
 

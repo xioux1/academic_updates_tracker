@@ -4,13 +4,14 @@ run_weekly.py — Standalone weekly scan script.
 Usage:
     python run_weekly.py            # full pipeline
     python run_weekly.py --no-mail  # skip email sending
-    python run_weekly.py --no-alerts  # skip alert email
+    python run_weekly.py --no-alerts  # skip alert email only
 
 Can be called manually, from a CI job, or from the Render Shell tab.
 The APScheduler in app.py calls the same pipeline automatically every Monday.
 """
 
 import argparse
+import contextlib
 import logging
 import sys
 import time
@@ -35,21 +36,17 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def _step(name: str):
-    """Context manager that logs step start/end with elapsed time."""
-    import contextlib
-
-    @contextlib.contextmanager
-    def _ctx():
-        log.info("── %s: start", name)
-        t0 = time.monotonic()
-        try:
-            yield
-        finally:
-            elapsed = time.monotonic() - t0
-            log.info("── %s: done (%.1fs)", name, elapsed)
-
-    return _ctx()
+@contextlib.contextmanager
+def _step(name: str, step_times: dict):
+    """Log step start/end with elapsed time and store in step_times dict."""
+    log.info("── %s: start", name)
+    t0 = time.monotonic()
+    try:
+        yield
+    finally:
+        elapsed = time.monotonic() - t0
+        step_times[name] = round(elapsed, 2)
+        log.info("── %s: done (%.1fs)", name, elapsed)
 
 
 def _warn_consecutive_failures(threshold: int = 3) -> None:
@@ -67,31 +64,35 @@ def main(send_email: bool = True, send_alerts: bool = True) -> int:
     t_total = time.monotonic()
     log.info("=== AcademicRadar weekly scan start ===")
 
+    step_times: dict = {}
+    analysis_failed = False
+    alerts_count = 0
+    scan_summary: dict = {}
+
     # 1 — Ensure DB is initialised
     db.init_db(cfg.DB_PATH)
     log.info("DB: %s", cfg.DB_PATH)
 
     # 2 — Scrape all sources
-    with _step("Step 1/4 — Scraping sources"):
+    with _step("scraping_s", step_times):
         try:
-            summary = scraper.run_full_scan(
+            scan_summary = scraper.run_full_scan(
                 cfg.DB_PATH,
                 run_metadata={"run_kind": "production", "trigger": "run_weekly.py"},
             )
-            db.log_scan(summary, cfg.DB_PATH)
             log.info(
                 "Scraper done: %d new findings / %d total | %d errors",
-                summary["findings_new"], summary["findings_total"],
-                len(summary.get("errors", [])),
+                scan_summary["findings_new"], scan_summary["findings_total"],
+                len(scan_summary.get("errors", [])),
             )
-            for err in summary.get("errors", [])[:5]:
+            for err in scan_summary.get("errors", [])[:5]:
                 log.warning("  Scraper error: %s", err[:200])
         except Exception as e:
             log.error("Scraper failed: %s", e)
             return 1
 
     # 3 — Analyse with Claude
-    with _step("Step 2/4 — Analysing findings"):
+    with _step("analysis_s", step_times):
         try:
             result = analyzer.run_analysis(cfg.DB_PATH, batch_size=100)
             log.info(
@@ -100,21 +101,21 @@ def main(send_email: bool = True, send_alerts: bool = True) -> int:
             )
         except Exception as e:
             log.error("Analysis failed: %s", e)
-            # Non-fatal — carry on to digest
+            analysis_failed = True
+            # Non-fatal — carry on
 
     # 4 — Deadline + sensitive change alerts
-    with _step("Step 3/4 — Alerts"):
+    with _step("alerts_s", step_times):
         try:
             alert = check_and_send_alerts(cfg.DB_PATH, send_email=send_alerts and send_email)
             if alert:
-                upcoming_n = len(alert.get("upcoming_deadlines") or [])
-                changes_n  = len(alert.get("sensitive_changes") or [])
-                log.info("Alert sent: %d deadlines, %d changes.", upcoming_n, changes_n)
+                alerts_count = len(alert.get("upcoming_deadlines") or []) + len(alert.get("sensitive_changes") or [])
+                log.info("Alerts sent: %d items.", alerts_count)
         except Exception as e:
             log.error("Alert check failed: %s", e)
 
     # 5 — Generate and send digest
-    with _step("Step 4/4 — Digest"):
+    with _step("digest_s", step_times):
         try:
             res = run_digest(cfg.DB_PATH, send_email=send_email)
             stats = res["digest"]["stats"]
@@ -125,10 +126,17 @@ def main(send_email: bool = True, send_alerts: bool = True) -> int:
         except Exception as e:
             log.error("Digest failed: %s", e)
 
-    # 6 — Warn on consecutive source failures
+    # 6 — Persist scan metrics (including step timings)
+    total_elapsed = round(time.monotonic() - t_total, 2)
+    scan_summary["step_durations"] = step_times
+    scan_summary["total_duration_s"] = total_elapsed
+    scan_summary["analysis_failed"] = analysis_failed
+    scan_summary["alerts_count"] = alerts_count
+    db.log_scan(scan_summary, cfg.DB_PATH)
+
+    # 7 — Warn on consecutive source failures
     _warn_consecutive_failures(threshold=3)
 
-    total_elapsed = time.monotonic() - t_total
     log.info("=== AcademicRadar weekly scan complete (%.1fs total) ===", total_elapsed)
     return 0
 

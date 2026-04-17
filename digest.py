@@ -281,6 +281,209 @@ def send_digest_email(digest: dict, to_address: str = EMAIL_TO) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Alert: upcoming deadlines + sensitive field changes
+# ---------------------------------------------------------------------------
+
+def generate_alerts(db_path: str = None, deadline_days: int = 14) -> dict:
+    """
+    Build an alert payload with:
+    - Programs whose deadline falls within the next `deadline_days` days.
+    - Sensitive field changes detected in the same window.
+    Returns {} when there is nothing to alert about.
+    """
+    if db_path is None:
+        from config import DB_PATH
+        db_path = DB_PATH
+
+    from datetime import datetime, timezone, timedelta
+    since_iso = (datetime.now(timezone.utc) - timedelta(days=deadline_days)).strftime("%Y-%m-%d %H:%M:%S")
+
+    upcoming = db.get_upcoming_deadline_programs(days_ahead=deadline_days, db_path=db_path)
+    changes  = db.get_recent_audit_changes(since_iso=since_iso, db_path=db_path)
+
+    if not upcoming and not changes:
+        return {}
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "deadline_days": deadline_days,
+        "upcoming_deadlines": upcoming,
+        "sensitive_changes": changes,
+    }
+
+
+def _alert_html(alert: dict) -> str:
+    upcoming = alert.get("upcoming_deadlines") or []
+    changes  = alert.get("sensitive_changes") or []
+    generated = alert["generated_at"][:10]
+    deadline_days = alert.get("deadline_days", 14)
+
+    deadline_rows = ""
+    for prog in upcoming:
+        days = prog["days_until"]
+        urgency_color = "#dc3545" if days <= 3 else "#ffc107" if days <= 7 else "#28a745"
+        deadline_rows += (
+            f'<tr>'
+            f'<td style="padding:4px 8px;">{prog["university_name"]}</td>'
+            f'<td style="padding:4px 8px;">{prog["name"]}</td>'
+            f'<td style="padding:4px 8px;color:{urgency_color};font-weight:bold;">'
+            f'{prog["deadline_date"]} ({days}d)</td>'
+            f'</tr>\n'
+        )
+
+    change_items = ""
+    for rec in changes[:20]:
+        details = rec.get("details_parsed") or {}
+        entity = (
+            f"{rec['university_name']} — {rec['program_name']}"
+            if rec.get("program_name") else f"{rec['entity_type']} #{rec['entity_id']}"
+        )
+        change_items += (
+            f'<li style="margin-bottom:6px;">'
+            f'<strong>{entity}</strong> · <code>{rec["change_type"]}</code>'
+            f' · {rec["detected_at"][:10]}'
+        )
+        if details:
+            for field, diff in details.items():
+                if isinstance(diff, dict) and "before" in diff:
+                    change_items += (
+                        f'<br><span style="color:#888;font-size:12px;">'
+                        f'{field}: <s>{diff["before"]}</s> → {diff["after"]}</span>'
+                    )
+        change_items += '</li>\n'
+
+    deadline_section = ""
+    if upcoming:
+        deadline_section = f"""
+<h2 style="color:#f38ba8;">⏰ Deadlines próximos ({len(upcoming)} programas)</h2>
+<table style="border-collapse:collapse;width:100%;background:#1e1e2e;">
+  <thead>
+    <tr style="color:#888;font-size:12px;text-align:left;">
+      <th style="padding:4px 8px;">Universidad</th>
+      <th style="padding:4px 8px;">Programa</th>
+      <th style="padding:4px 8px;">Deadline</th>
+    </tr>
+  </thead>
+  <tbody>{deadline_rows}</tbody>
+</table>"""
+
+    changes_section = ""
+    if changes:
+        changes_section = f"""
+<h2 style="color:#fab387;">🔔 Cambios sensibles ({len(changes)} registros)</h2>
+<ul style="list-style:none;padding:0;">{change_items}</ul>"""
+
+    return f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8">
+<style>
+  body {{ background:#11111b; color:#cdd6f4; font-family:'Segoe UI',sans-serif;
+          max-width:800px; margin:0 auto; padding:24px; }}
+  h1 {{ color:#cba6f7; }} h2 {{ color:#89b4fa; }}
+</style>
+</head>
+<body>
+<h1>🎓 AcademicRadar — Alerta</h1>
+<p style="color:#888;">Generado: {generated} &nbsp;|&nbsp; Ventana: {deadline_days} días</p>
+{deadline_section}
+{changes_section}
+<hr style="border-color:#333;margin:24px 0;">
+<p style="color:#555;font-size:11px;text-align:center;">AcademicRadar · alerta automática</p>
+</body>
+</html>"""
+
+
+def _alert_plaintext(alert: dict) -> str:
+    lines = [
+        "=" * 60,
+        "ACADEMICRADAR — ALERTA",
+        f"Generado: {alert['generated_at'][:10]}  |  Ventana: {alert['deadline_days']} días",
+        "=" * 60,
+    ]
+    upcoming = alert.get("upcoming_deadlines") or []
+    if upcoming:
+        lines += ["", "⏰ DEADLINES PRÓXIMOS", "-" * 40]
+        for prog in upcoming:
+            lines.append(f"  [{prog['days_until']}d] {prog['university_name']} — {prog['name']}: {prog['deadline_date']}")
+
+    changes = alert.get("sensitive_changes") or []
+    if changes:
+        lines += ["", "🔔 CAMBIOS SENSIBLES", "-" * 40]
+        for rec in changes[:20]:
+            entity = (
+                f"{rec['university_name']} — {rec['program_name']}"
+                if rec.get("program_name") else f"{rec['entity_type']} #{rec['entity_id']}"
+            )
+            lines.append(f"  {entity} · {rec['change_type']} · {rec['detected_at'][:10]}")
+
+    return "\n".join(lines)
+
+
+def send_alert_email(alert: dict, to_address: str = EMAIL_TO) -> bool:
+    """Send an alert email for upcoming deadlines / sensitive changes."""
+    if not all([SMTP_HOST, SMTP_USER, SMTP_PASSWORD, to_address]):
+        log.error("SMTP not fully configured — cannot send alert email")
+        return False
+
+    upcoming_count = len(alert.get("upcoming_deadlines") or [])
+    changes_count  = len(alert.get("sensitive_changes") or [])
+    subject = (
+        f"{EMAIL_SUBJECT_PREFIX} Alerta — "
+        f"{upcoming_count} deadlines próximos, {changes_count} cambios sensibles"
+    )
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_FROM or SMTP_USER
+    msg["To"] = to_address
+
+    msg.attach(MIMEText(_alert_plaintext(alert), "plain", "utf-8"))
+    msg.attach(MIMEText(_alert_html(alert), "html", "utf-8"))
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(msg["From"], [to_address], msg.as_string())
+        log.info("Alert email sent to %s (%d deadlines, %d changes)", to_address, upcoming_count, changes_count)
+        return True
+    except Exception as e:
+        log.error("Failed to send alert email: %s", e)
+        return False
+
+
+def check_and_send_alerts(
+    db_path: str = None,
+    deadline_days: int = 14,
+    send_email: bool = True,
+) -> dict:
+    """
+    Generate alerts and send email if anything requires attention.
+    Returns the alert dict (empty dict when nothing to alert).
+    """
+    if db_path is None:
+        from config import DB_PATH
+        db_path = DB_PATH
+
+    alert = generate_alerts(db_path=db_path, deadline_days=deadline_days)
+    if not alert:
+        log.info("No alerts to send (no upcoming deadlines or sensitive changes).")
+        return {}
+
+    upcoming_n = len(alert.get("upcoming_deadlines") or [])
+    changes_n  = len(alert.get("sensitive_changes") or [])
+    log.info("Alerts: %d upcoming deadlines, %d sensitive changes.", upcoming_n, changes_n)
+
+    if send_email and EMAIL_TO:
+        send_alert_email(alert, to_address=EMAIL_TO)
+    else:
+        log.info("Alert email skipped (send_email=%s, EMAIL_TO=%r)", send_email, EMAIL_TO)
+
+    return alert
+
+
+# ---------------------------------------------------------------------------
 # Main entrypoint used by GitHub Actions and the dashboard
 # ---------------------------------------------------------------------------
 

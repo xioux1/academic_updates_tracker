@@ -69,7 +69,7 @@ def _start_scheduler():
         from apscheduler.schedulers.background import BackgroundScheduler
         from apscheduler.triggers.cron import CronTrigger
         import scraper, analyzer
-        from digest import run_digest
+        from digest import run_digest, check_and_send_alerts
 
         def weekly_job():
             logging.info("APScheduler: starting weekly scan…")
@@ -77,6 +77,7 @@ def _start_scheduler():
                 summary = scraper.run_full_scan(cfg.DB_PATH)
                 db.log_scan(summary, cfg.DB_PATH)
                 analyzer.run_analysis(cfg.DB_PATH, batch_size=100)
+                check_and_send_alerts(cfg.DB_PATH, send_email=bool(cfg.EMAIL_TO))
                 run_digest(cfg.DB_PATH, send_email=bool(cfg.EMAIL_TO))
                 logging.info("APScheduler: weekly scan complete.")
             except Exception as e:
@@ -125,7 +126,7 @@ with st.sidebar:
     page = st.radio(
         "Navegación",
         ["📊 Dashboard", "🧭 Decision Console", "👨‍🏫 Profesores", "🔑 Keywords",
-         "📄 Findings", "📬 Digest", "⚙️ Configuración"],
+         "📄 Findings", "📬 Digest", "📈 Calidad", "⚙️ Configuración"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -145,4 +146,5 @@ elif page == "👨‍🏫 Profesores":     exec(open(os.path.join(_views_dir, "p
 elif page == "🔑 Keywords":         exec(open(os.path.join(_views_dir, "keywords.py")).read())
 elif page == "📄 Findings":         exec(open(os.path.join(_views_dir, "findings.py")).read())
 elif page == "📬 Digest":           exec(open(os.path.join(_views_dir, "digest_view.py")).read())
+elif page == "📈 Calidad":          exec(open(os.path.join(_views_dir, "quality.py")).read())
 elif page == "⚙️ Configuración":    exec(open(os.path.join(_views_dir, "settings.py")).read())
